@@ -1,0 +1,30 @@
+# Local infrastructure for the Distributed Load Testing Platform.
+#
+# Phase 1 only needs PostgreSQL. Backend, worker, and target services will be
+# added to this file in later steps as they become containerized.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: dltp-postgres
+    environment:
+      POSTGRES_USER: dltp
+      POSTGRES_PASSWORD: dltp
+      POSTGRES_DB: dltp
+    ports:
+      # Exposed on the host so we can connect from local Go services and psql.
+      - "5432:5432"
+    volumes:
+      # Persist database data across container restarts.
+      - postgres_data:/var/lib/postgresql/data
+      # Any .sql file here runs automatically the FIRST time the data volume
+      # is created (empty volume only). This bootstraps our schema.
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dltp -d dltp"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
