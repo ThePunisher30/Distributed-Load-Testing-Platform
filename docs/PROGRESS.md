@@ -599,6 +599,122 @@ GET /test-runs/2 -> completed, totalRequests 300 (3 VUs * 100).
 No manual claim/complete calls were made: the worker drove the lifecycle.
 ```
 
+## Step 9: Custom Closed-Loop Virtual-User Runner
+
+Status:
+
+```text
+Completed
+```
+
+Files created:
+
+```text
+worker/internal/runner/runner.go     Config, Result, Run, runVirtualUser,
+                                      doRequest, newHTTPClient
+worker/internal/runner/stats.go       vuStats, record, mergeStats
+worker/internal/runner/stats_test.go  unit tests for the aggregation
+```
+
+Files changed:
+
+```text
+worker/cmd/worker/main.go  (executeRun now calls the runner instead of
+                            returning fabricated numbers)
+```
+
+What was done:
+
+Replaced the placeholder `executeRun` with a real load engine. The runner is a
+separate, self-contained package that takes a `Config` (target URL, method,
+virtual users, duration, per-request timeout) and returns an aggregated
+`Result` (request counts and avg/min/max latency). It deliberately knows nothing
+about the backend, so it can be unit tested on its own.
+
+The load model is closed-loop, one goroutine per virtual user:
+
+```text
+Run
+  -> context.WithTimeout(ctx, Duration)   (stops all VUs when time is up
+                                           OR the worker is cancelled)
+  -> make([]vuStats, VirtualUsers)        (one private tally per VU)
+  -> spawn VirtualUsers goroutines via a sync.WaitGroup; VU i writes ONLY
+     to stats[i], so no locks are needed
+  -> each VU loops: send request, measure latency, record, repeat until ctx done
+  -> wg.Wait(), then mergeStats(stats) -> Result
+```
+
+Design points:
+
+- Each virtual user owns its own `vuStats`; results are merged only after all
+  goroutines finish. This is aggregation without shared mutation, so the design
+  is race-free by construction (proven with `go test -race`).
+- A single tuned `http.Client` is shared by all VUs. Go's default transport caps
+  idle connections per host at 2, which would throttle the generator and make us
+  measure our own connection churn; we raise the limits to the VU count.
+- Each request gets its own timeout derived from the run context, so a slow
+  request is cut off by whichever fires first: its timeout, the run duration, or
+  worker shutdown.
+- Success rule: HTTP status < 400 is a success; a transport error (no response)
+  or status >= 400 is a failure. Latency is recorded for any response (a 500 has
+  a real latency); transport errors contribute no sample.
+
+Learning point:
+
+```text
+Give each goroutine its own memory to write, then combine after WaitGroup.Wait,
+and you get correct aggregation with no mutex and no data race. FOR the load
+client, one shared connection-pooled http.Client is essential -- the default
+transport's per-host idle cap of 2 would otherwise bottleneck the whole test.
+```
+
+Windows dev caveat:
+
+```text
+On Windows the Go monotonic clock is coarse: fast localhost requests can measure
+0 ns, so minLatencyMs often reads 0 locally. A raw probe confirmed ~48% of
+requests measured exactly 0 ns OUTSIDE the runner, so this is a platform clock
+limitation, not a bug. On Linux (where the worker runs in its container) the
+resolution is nanoseconds and min becomes a real value.
+```
+
+Commands used:
+
+```powershell
+cd worker
+gofmt -w .\internal\runner\ .\cmd\worker\main.go
+go vet ./...
+go build ./...
+go test -race ./internal/runner/
+```
+
+Verification:
+
+Unit tests (`go test -race ./internal/runner/`):
+
+```text
+TestMergeStats_Mix          avg 16.25, min 5, max 30 from a hand-built mix
+TestMergeStats_ZeroSampleVU min stays 5 (a no-sample VU does not drag it to 0)
+TestMergeStats_AllFailures  no divide-by-zero when nothing got a response
+All PASS under the race detector.
+```
+
+Full end-to-end lifecycle (all services running: Postgres, target, backend,
+worker):
+
+```text
+POST /test-runs  {20 virtual users, 5s, http://localhost:8081/fast}  -> id=5 queued
+worker log: claimed run 5 ... ; run 5 reported as completed
+GET /test-runs/5 -> completed with REAL results:
+  totalRequests      204900   (~41k req/s)
+  successfulRequests 204897
+  failedRequests     3        (requests cut off at the 5s deadline)
+  avgLatencyMs       0.465
+  maxLatencyMs       34.13
+  minLatencyMs       0        (Windows clock artifact, see caveat above)
+  startedAt -> completedAt spans exactly the 5s run duration
+```
+
 ## Current System State
 
 Working:
@@ -607,31 +723,32 @@ Working:
 Target service
 PostgreSQL (running in Docker, schema bootstrapped)
 Backend API (public + internal endpoints)
-Worker (polls, claims, completes runs automatically)
-End-to-end lifecycle runs on its own -- but load results are FAKE (placeholder)
+Worker (polls, claims, executes, completes runs automatically)
+Custom load runner (real concurrent traffic + real aggregated metrics)
+End-to-end lifecycle runs on its own with REAL load results
 ```
+
+Phase 1 (Single-Worker MVP) is functionally complete: the success criterion
+(create -> claim -> generate load -> store results -> read back) is met.
 
 Not built yet:
 
 ```text
-Custom runner (real load generation)
-Real result aggregation
+Docker Compose entries for backend/worker/target (only Postgres is containerized)
+Percentiles (p50/p95/p99), headers/body, non-GET methods, think-time (Phase 5)
+A permanent test for Run/doRequest via httptest (only aggregation is unit-tested)
 ```
 
 ## Next Step
 
-Next planned step:
+Options from here:
 
 ```text
-Step 9: Custom closed-loop virtual-user runner
-```
-
-What Step 9 will achieve:
-
-```text
-Replace the placeholder executeRun with a real load runner: spin up N virtual
-users as goroutines that send HTTP requests to the target for the configured
-duration, with per-request timeouts and clean cancellation. This is the core
-concurrency step.
+- C++ twin of the runner: rebuild the same load engine in C++ to learn
+  std::thread, std::mutex/lock_guard, std::atomic, and TSan (a parallel
+  concurrency exercise against the same target service).
+- Or continue the platform: add backend/worker/target to Docker Compose so the
+  whole system comes up with one command, then begin Phase 2 (queue-based job
+  distribution).
 ```
 

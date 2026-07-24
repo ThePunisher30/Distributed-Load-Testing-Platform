@@ -1,0 +1,33 @@
+# Compiled binaries and objects
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test / coverage output
+*.test
+*.out
+coverage.*
+
+# Go workspace file (local, machine-specific)
+go.work
+go.work.sum
+
+# Local build output directories
+/bin/
+/dist/
+
+# Environment / secrets (never commit these)
+.env
+*.env
+.env.local
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# OS cruft
+.DS_Store
+Thumbs.db

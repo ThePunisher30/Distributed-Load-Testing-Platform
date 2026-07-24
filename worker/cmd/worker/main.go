@@ -1,10 +1,6 @@
 // Command worker is the load-generating service. It repeatedly asks the backend
-// for a queued test run; when it claims one, it executes the load test and
-// reports the results back.
-//
-// In this step the execution is a PLACEHOLDER that returns fake numbers so we
-// can prove the polling + claim + complete loop works. Step 9 replaces it with
-// the real concurrent load runner.
+// for a queued test run; when it claims one, it executes the load test with the
+// runner and reports the aggregated results back.
 package main
 
 import (
@@ -16,6 +12,7 @@ import (
 	"time"
 
 	"distributed-load-testing-platform/worker/internal/client"
+	"distributed-load-testing-platform/worker/internal/runner"
 )
 
 func main() {
@@ -85,29 +82,36 @@ func pollOnce(ctx context.Context, c *client.Client) bool {
 	return true
 }
 
-// executeRun is a PLACEHOLDER for Step 8. It pretends to run the load test and
-// returns fabricated results so we can verify the full loop. Step 9 replaces
-// this with the real runner that actually generates traffic against the target.
+// executeRun runs the claimed load test using the runner and maps its Result
+// into the completion payload the backend expects. A run that cannot start (bad
+// config) is reported as failed; a run that executed is reported as completed,
+// even if some individual requests failed.
 func executeRun(ctx context.Context, run *client.TestRun) client.CompleteRequest {
-	// Simulate a tiny amount of work, but respect cancellation.
-	select {
-	case <-ctx.Done():
-	case <-time.After(500 * time.Millisecond):
+	cfg := runner.Config{
+		TargetURL:      run.TargetURL,
+		Method:         run.Method,
+		VirtualUsers:   run.VirtualUsers,
+		Duration:       time.Duration(run.DurationSeconds) * time.Second,
+		RequestTimeout: 5 * time.Second,
 	}
 
-	total := int64(run.VirtualUsers) * 100
-	var failed int64 = 0
-	success := total - failed
-	avg, min, max := 10.0, 2.0, 50.0
+	res, err := runner.Run(ctx, cfg)
+	if err != nil {
+		msg := err.Error()
+		return client.CompleteRequest{
+			Status:       "failed",
+			ErrorMessage: &msg,
+		}
+	}
 
 	return client.CompleteRequest{
 		Status:             "completed",
-		TotalRequests:      &total,
-		SuccessfulRequests: &success,
-		FailedRequests:     &failed,
-		AvgLatencyMs:       &avg,
-		MinLatencyMs:       &min,
-		MaxLatencyMs:       &max,
+		TotalRequests:      &res.TotalRequests,
+		SuccessfulRequests: &res.SuccessfulRequests,
+		FailedRequests:     &res.FailedRequests,
+		AvgLatencyMs:       &res.AvgLatencyMs,
+		MinLatencyMs:       &res.MinLatencyMs,
+		MaxLatencyMs:       &res.MaxLatencyMs,
 	}
 }
 
