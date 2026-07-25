@@ -715,40 +715,125 @@ GET /test-runs/5 -> completed with REAL results:
   startedAt -> completedAt spans exactly the 5s run duration
 ```
 
+## Step 10: Full Docker Compose (Phase 1 complete)
+
+Status:
+
+```text
+Completed
+```
+
+Files created:
+
+```text
+backend/Dockerfile
+worker/Dockerfile
+target/Dockerfile
+```
+
+Files changed:
+
+```text
+docker-compose.yml  (added backend, worker, target services alongside postgres)
+```
+
+What was done:
+
+Containerized all three services so the entire platform comes up with a single
+command. Each Dockerfile is a multi-stage build: a golang:1.26 stage compiles a
+static binary (CGO_ENABLED=0), then a minimal alpine stage runs it as a non-root
+user. docker-compose.yml now defines four services on one network:
+
+```text
+docker compose up --build
+  postgres  ->  backend  ->  worker
+                   \-> target (independent; the worker sends load to it)
+```
+
+Design points:
+
+- Services reach each other by SERVICE NAME on the compose network, not
+  localhost. The backend connects to host "postgres"; the worker calls
+  "http://backend:8080"; a test run targets "http://target:8081/fast". This is
+  service discovery, the same idea Kubernetes uses.
+- Startup order is enforced with depends_on + healthchecks: backend waits for
+  postgres to be healthy, worker waits for backend to be healthy. The backend's
+  healthcheck hits /health, which pings the DB, so "healthy" also means the DB is
+  reachable.
+- Env vars override the localhost defaults baked into each binary
+  (DATABASE_URL, BACKEND_URL), so the same code runs on the host or in Compose.
+
+Learning point:
+
+```text
+Inside Docker each container is its own host, so "localhost" no longer finds the
+other services -- they are addressed by service name over the compose network.
+depends_on + healthchecks replace "start them in the right order by hand".
+```
+
+Commands used:
+
+```powershell
+docker compose config --quiet
+docker compose up --build -d
+docker compose ps
+docker compose logs worker
+```
+
+Verification (all four containers up, run created from the host):
+
+```text
+docker compose ps -> postgres, backend, target all healthy; worker up
+POST http://localhost:8080/test-runs
+  {15 VUs, 4s, targetUrl "http://target:8081/fast"}   -> id=6 queued
+worker log: claimed run 6 ... http://target:8081/fast ; reported as completed
+GET /test-runs/6 -> completed with REAL results:
+  totalRequests      80518
+  successfulRequests 80503
+  failedRequests     15
+  avgLatencyMs       0.725
+  maxLatencyMs       13.44
+  minLatencyMs       0.051   (a REAL value now -- worker runs on Linux in its
+                              container, so the clock is not the coarse Windows one)
+```
+
 ## Current System State
 
 Working:
 
 ```text
-Target service
-PostgreSQL (running in Docker, schema bootstrapped)
-Backend API (public + internal endpoints)
-Worker (polls, claims, executes, completes runs automatically)
-Custom load runner (real concurrent traffic + real aggregated metrics)
-End-to-end lifecycle runs on its own with REAL load results
+Whole platform runs in Docker Compose (postgres + backend + worker + target),
+brought up with one command and wired by service name.
+End-to-end lifecycle runs on its own with REAL load results.
 ```
 
-Phase 1 (Single-Worker MVP) is functionally complete: the success criterion
-(create -> claim -> generate load -> store results -> read back) is met.
+Phase 1 (Single-Worker MVP) is COMPLETE: every roadmap item for Phase 1,
+including the Docker Compose flow, is done.
+
+Side exercise (not in the platform repo):
+
+```text
+A standalone C++ "twin" of the runner was built to learn std::thread,
+std::mutex/lock_guard, std::atomic, and compare-and-swap: the same load engine
+in C++, used to measure lock-free vs mutex vs atomic and to reproduce a data
+race by hand. Kept local, deliberately outside this repository.
+```
 
 Not built yet:
 
 ```text
-Docker Compose entries for backend/worker/target (only Postgres is containerized)
 Percentiles (p50/p95/p99), headers/body, non-GET methods, think-time (Phase 5)
 A permanent test for Run/doRequest via httptest (only aggregation is unit-tested)
 ```
 
 ## Next Step
 
-Options from here:
+Phase 2: Queue-Based Job Distribution.
 
 ```text
-- C++ twin of the runner: rebuild the same load engine in C++ to learn
-  std::thread, std::mutex/lock_guard, std::atomic, and TSan (a parallel
-  concurrency exercise against the same target service).
-- Or continue the platform: add backend/worker/target to Docker Compose so the
-  whole system comes up with one command, then begin Phase 2 (queue-based job
-  distribution).
+Replace the worker's polling loop with a real message broker (Redis Streams or
+NATS): the backend publishes a job, the worker consumes it, with acknowledgements,
+retries, and dead-letter handling. Teaches async messaging, at-least-once
+delivery, and idempotency.
 ```
 

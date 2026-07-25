@@ -1,7 +1,10 @@
 # Local infrastructure for the Distributed Load Testing Platform.
 #
-# Phase 1 only needs PostgreSQL. Backend, worker, and target services will be
-# added to this file in later steps as they become containerized.
+# Brings up the whole system with one command:
+#   docker compose up --build
+#
+# Services reach each other by service name on the default compose network
+# (e.g. the backend connects to "postgres", the worker calls "backend").
 
 services:
   postgres:
@@ -12,7 +15,7 @@ services:
       POSTGRES_PASSWORD: dltp
       POSTGRES_DB: dltp
     ports:
-      # Exposed on the host so we can connect from local Go services and psql.
+      # Exposed on the host so we can connect from local tools and psql.
       - "5432:5432"
     volumes:
       # Persist database data across container restarts.
@@ -24,6 +27,49 @@ services:
       test: ["CMD-SHELL", "pg_isready -U dltp -d dltp"]
       interval: 5s
       timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    container_name: dltp-backend
+    environment:
+      # Host is the "postgres" service name, not localhost, inside the network.
+      DATABASE_URL: postgres://dltp:dltp@postgres:5432/dltp?sslmode=disable
+      BACKEND_ADDR: ":8080"
+    ports:
+      # Exposed so you can POST test runs from the host.
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # /health pings the DB, so a healthy backend also means the DB is reachable.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  worker:
+    build: ./worker
+    container_name: dltp-worker
+    environment:
+      # Reach the backend by service name.
+      BACKEND_URL: http://backend:8080
+      POLL_INTERVAL: 2s
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  target:
+    build: ./target
+    container_name: dltp-target
+    ports:
+      # Exposed for direct testing; the worker reaches it as http://target:8081.
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8081/health"]
+      interval: 5s
+      timeout: 3s
       retries: 5
 
 volumes:
