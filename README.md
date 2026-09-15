@@ -1,53 +1,74 @@
 # Distributed Load Testing Platform
 
-This project is a learning-focused distributed load testing platform. The goal is not just to build a tool that sends HTTP requests, but to understand the system design behind distributed workers, orchestration, queues, metrics, failure handling, and observability.
+A learning-focused distributed load testing platform. The goal is not just to
+build a tool that sends HTTP requests, but to understand the system design behind
+distributed workers, orchestration, message queues, metrics, failure handling,
+and observability — by building each piece from scratch.
 
-The platform will start small and grow in phases. In the first phase, we will build a complete single-worker lifecycle:
-
-```text
-Create test run -> worker claims it -> custom runner sends load -> results are stored
-```
-
-Over time, this will evolve into a distributed system with multiple workers, a message broker, live metrics, a dashboard, and safety controls.
-
-## Core Idea
-
-A load testing platform simulates many users hitting a target application so we can measure how the application behaves under pressure.
-
-This project will have four initial services:
+The platform grows in phases. **Phases 1 and 2 are complete**: a full test-run
+lifecycle, distributed through a Redis Streams message broker, with worker crash
+recovery and dead-lettering.
 
 ```text
-Backend API      -> control plane that creates and tracks test runs
-Worker           -> executes load tests using our own custom runner
-Target Service   -> safe local app to test against
-PostgreSQL       -> stores test definitions and results
+create test run -> backend publishes a job -> worker consumes it ->
+custom runner sends load -> results stored -> read back
 ```
 
-The runner will be written from scratch instead of using k6, JMeter, Locust, or Gatling. This is intentional because the project is meant to teach concurrency, request scheduling, timeouts, cancellation, aggregation, and worker design.
+## Core idea
 
-## First Milestone
+A load testing platform simulates many users hitting a target application so we
+can measure how it behaves under pressure. This project has these services:
 
-The first milestone is complete when we can:
+```text
+Backend API     control plane: creates/tracks test runs, publishes jobs
+Worker          consumes jobs and executes them with a custom load runner
+Target Service  safe local app to send load at (/fast, /slow, /error, /random)
+PostgreSQL      source of truth for test-run config and results
+Redis           message broker (Streams) that distributes jobs to workers
+```
 
-1. Start PostgreSQL locally.
-2. Run the backend API.
-3. Run the target service.
-4. Run one worker.
-5. Create a test run through the backend API.
-6. Have the worker claim and execute that test.
-7. Store final results in PostgreSQL.
-8. Fetch the completed test run from the API.
+The load runner is written from scratch (no k6, JMeter, Locust, or Gatling) on
+purpose: it is where the concurrency lessons live — a goroutine per virtual user,
+context cancellation, per-request timeouts, and race-free result aggregation.
 
-Example test:
+## Architecture
 
-```json
-{
-  "name": "Fast endpoint test",
-  "targetUrl": "http://target:8081/fast",
-  "method": "GET",
-  "virtualUsers": 10,
-  "durationSeconds": 30
-}
+```text
+create:  curl --POST /test-runs-->  Backend  --INSERT (queued)-->  PostgreSQL
+                                    Backend  --XADD job (run id)-->  Redis "testruns"
+
+run:     Redis  --XREADGROUP-->  Worker  --start / complete (HTTP)-->  Backend --> PostgreSQL
+                                 Worker  --HTTP load-->  Target Service
+                                 Worker  --XACK-->  Redis   (job done)
+
+read:    curl --GET /test-runs/{id}-->  Backend  -->  PostgreSQL
+```
+
+The worker does not poll. The backend publishes a job to Redis; a worker consumes
+it via a consumer group, runs the load, and acknowledges it. If a worker dies
+mid-job, another reclaims the message after a visibility timeout; a job that keeps
+failing is moved to a dead-letter stream.
+
+## Running it
+
+Everything runs in Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+Create a test run (from the host):
+
+```bash
+curl -X POST http://localhost:8080/test-runs \
+  -H "Content-Type: application/json" \
+  -d '{"name":"demo","targetUrl":"http://target:8081/fast","method":"GET","virtualUsers":10,"durationSeconds":5}'
+```
+
+Read it back (use the id from the create response):
+
+```bash
+curl http://localhost:8080/test-runs/1
 ```
 
 Example result:
@@ -64,27 +85,39 @@ Example result:
 }
 ```
 
-## Planned Stack
+## Tests
 
-Phase 1 stack:
+```bash
+# Runner tests (goroutines + HTTP), no Docker needed:
+cd worker && go test -race ./internal/runner/
 
-- Go for backend, worker, target service, and custom runner
-- PostgreSQL for persistent storage
-- Docker Compose for local infrastructure
-- Plain HTTP APIs for service communication
+# Store tests need Postgres and a test database:
+docker compose up -d postgres
+export TEST_DATABASE_URL="postgres://dltp:dltp@localhost:5432/dltp_test?sslmode=disable"
+cd backend && go test ./internal/store/
+```
 
-Later phases may add:
+Store tests skip themselves when `TEST_DATABASE_URL` is unset, so `go test ./...`
+stays green without a database.
 
-- Redis Streams or NATS for job distribution
-- Prometheus for metrics
-- Grafana or a custom React dashboard
-- Multiple workers
-- Authentication, quotas, and target allowlists
-- Local Kubernetes using kind or minikube
+## Stack
+
+Current:
+
+- Go — backend, worker, target service, and the custom runner
+- PostgreSQL — persistent storage and source of truth
+- Redis Streams — job-distribution message broker (consumer groups, reclaim, dead-letter)
+- Docker Compose — local infrastructure, one-command startup
+
+Planned for later phases:
+
+- Multiple workers (Phase 3)
+- Prometheus + Grafana or a custom dashboard for live metrics (Phases 4 / 7)
+- Richer runner: percentiles, request bodies, more HTTP methods, think time (Phase 5)
+- Authentication, quotas, and target allowlists (Phase 8)
+- Local Kubernetes with kind or minikube (Phase 9)
 
 ## Documentation
-
-Start here:
 
 - [Project Roadmap](docs/ROADMAP.md)
 - [Architecture Notes](docs/ARCHITECTURE.md)

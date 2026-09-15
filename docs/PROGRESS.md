@@ -797,43 +797,115 @@ GET /test-runs/6 -> completed with REAL results:
                               container, so the clock is not the coarse Windows one)
 ```
 
+## Testing: a safety net before Phase 2
+
+Status:
+
+```text
+Completed
+```
+
+Added the first automated tests (before this, everything was verified by hand):
+
+- `worker/internal/runner/run_test.go`: drives the real `Run` (goroutines + HTTP)
+  against an in-process httptest server. Covers a 200 target (counts consistent,
+  min<=avg<=max), an all-500 target (zero successes), and bad-config errors. Runs
+  under `-race`. No Docker needed.
+- `backend/internal/store/test_run_store_test.go`: real SQL against Postgres.
+  Covers Create/GetByID, ClaimNext (SKIP LOCKED, FIFO), StartByID, TakeOver, Fail,
+  and Complete -- including the state-guard errors (ErrNotQueued, ErrNotRunning,
+  ErrAlreadyDone) that make duplicate delivery safe. Reads TEST_DATABASE_URL and
+  skips if unset, so `go test ./...` stays green without a DB.
+
+How to run:
+
+```powershell
+cd worker; go test -race ./internal/runner/
+docker compose up -d postgres
+$env:TEST_DATABASE_URL = "postgres://dltp:dltp@localhost:5432/dltp_test?sslmode=disable"
+cd backend; go test ./internal/store/
+```
+
+## Phase 2: Queue-Based Job Distribution
+
+The worker no longer polls. Jobs flow through a Redis Streams broker. New service:
+`redis:7-alpine`. Stream `testruns`, consumer group `workers`, dead stream
+`testruns:dead`.
+
+### Step 11: publish + consume via a consumer group
+
+Backend publishes a job (the run id) to the stream on create (XADD), alongside the
+Postgres INSERT. The worker consumes via a consumer group (XREADGROUP), starts the
+specific run (POST /internal/test-runs/{id}/start, a state-guarded queued->running
+that is idempotent -- a duplicate delivery of an already-started run gets 409 and
+is skipped), executes, completes, then XACK.
+
+```text
+Verified: a run is picked up ~36ms after creation (vs up to 2s with polling),
+completes with real results, and leaves zero pending messages after ack.
+Learning: push (broker) vs pull (polling); consumer groups; acknowledgements.
+```
+
+### Step 12: reclaim orphaned jobs (visibility timeout)
+
+Each loop the worker reclaims messages idle longer than RECLAIM_MIN_IDLE -- the
+signal that the worker holding them died -- and takes them over via
+POST .../takeover (store.TakeOver accepts a run that is already 'running', so a
+worker that crashed mid-execution can be recovered; normal delivery uses the
+stricter StartByID).
+
+```text
+Verified: a 20s run whose worker was SIGKILLed mid-execution (left 'running',
+XPENDING 1) was reclaimed ~10s later by a restarted worker, taken over, and
+completed (XPENDING 0). No job lost.
+Learning: at-least-once delivery, visibility timeout, idempotency. The reclaim
+path must be more permissive than the normal start -- safe because it only fires
+for a message idle past the timeout.
+```
+
+### Step 13: dead-letter poison jobs
+
+Reclaim scans with XPENDING (which reports each message's delivery count) + XCLAIM.
+A message delivered more than MAX_DELIVERIES times is dead-lettered: copied to
+`testruns:dead`, its run marked failed (POST .../fail, store.Fail), and acked out
+of the pending list so it stops cycling.
+
+```text
+Verified: a message pumped to 5 deliveries (> threshold 3) was dead-lettered --
+run marked failed with a reason, one entry in testruns:dead, zero left pending.
+A normal run still completes unaffected.
+Learning: poison-message handling; a delivery-count cap prevents infinite retries.
+```
+
 ## Current System State
 
-Working:
-
 ```text
-Whole platform runs in Docker Compose (postgres + backend + worker + target),
-brought up with one command and wired by service name.
-End-to-end lifecycle runs on its own with REAL load results.
+Whole platform runs in Docker Compose: postgres + redis + backend + worker +
+target. Jobs are distributed via a Redis Streams consumer group (no polling),
+with crash recovery (reclaim) and dead-lettering. End-to-end lifecycle runs on
+its own with REAL load results.
 ```
 
-Phase 1 (Single-Worker MVP) is COMPLETE: every roadmap item for Phase 1,
-including the Docker Compose flow, is done.
+Phases 1 and 2 are COMPLETE.
 
-Side exercise (not in the platform repo):
-
-```text
-A standalone C++ "twin" of the runner was built to learn std::thread,
-std::mutex/lock_guard, std::atomic, and compare-and-swap: the same load engine
-in C++, used to measure lock-free vs mutex vs atomic and to reproduce a data
-race by hand. Kept local, deliberately outside this repository.
-```
-
-Not built yet:
+Known follow-ups (not blocking):
 
 ```text
-Percentiles (p50/p95/p99), headers/body, non-GET methods, think-time (Phase 5)
-A permanent test for Run/doRequest via httptest (only aggregation is unit-tested)
+- Worker consumer name is PID-based (collides inside containers, all PID 1);
+  make it unique (hostname) for Phase 3 multi-worker.
+- Dual-write gap: if the INSERT succeeds but XADD fails, the run is queued with
+  no message and won't be delivered (add an outbox pattern later).
+- Percentiles (p50/p95/p99), headers/body, non-GET methods, think-time (Phase 5).
 ```
 
 ## Next Step
 
-Phase 2: Queue-Based Job Distribution.
+Phase 3: Multiple Workers.
 
 ```text
-Replace the worker's polling loop with a real message broker (Redis Streams or
-NATS): the backend publishes a job, the worker consumes it, with acknowledgements,
-retries, and dead-letter handling. Teaches async messaging, at-least-once
-delivery, and idempotency.
+Run several worker replicas. The Redis consumer group already load-balances
+messages across them, and reclaim already recovers a dead worker's job. Main
+work: unique consumer names (hostname), verify parallel claim + reclaim across
+workers, then optionally split one large run across multiple workers.
 ```
 
