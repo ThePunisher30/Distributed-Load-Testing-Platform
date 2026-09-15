@@ -36,11 +36,14 @@ services:
       # Host is the "postgres" service name, not localhost, inside the network.
       DATABASE_URL: postgres://dltp:dltp@postgres:5432/dltp?sslmode=disable
       BACKEND_ADDR: ":8080"
+      REDIS_ADDR: redis:6379
     ports:
       # Exposed so you can POST test runs from the host.
       - "8080:8080"
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       # /health pings the DB, so a healthy backend also means the DB is reachable.
@@ -53,11 +56,13 @@ services:
     build: ./worker
     container_name: dltp-worker
     environment:
-      # Reach the backend by service name.
+      # Reach the backend and broker by service name.
       BACKEND_URL: http://backend:8080
-      POLL_INTERVAL: 2s
+      REDIS_ADDR: redis:6379
     depends_on:
       backend:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   target:
@@ -68,6 +73,20 @@ services:
       - "8081:8081"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8081/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Phase 2: the message broker. The backend publishes jobs to a Redis stream;
+  # workers consume them via a consumer group instead of polling the backend.
+  redis:
+    image: redis:7-alpine
+    container_name: dltp-redis
+    ports:
+      # Exposed so we can inspect the stream with redis-cli from the host.
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5

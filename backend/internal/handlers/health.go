@@ -7,21 +7,25 @@ import (
 	"net/http"
 	"time"
 
+	"distributed-load-testing-platform/backend/internal/queue"
 	"distributed-load-testing-platform/backend/internal/store"
 )
 
 // Handler carries the dependencies our HTTP handlers need: the database pool
-// (for the health ping) and the stores that own each table's queries.
+// (for the health ping), the stores that own each table's queries, and the
+// queue publisher for enqueuing jobs.
 type Handler struct {
-	DB       *sql.DB
-	TestRuns *store.TestRunStore
+	DB        *sql.DB
+	TestRuns  *store.TestRunStore
+	Publisher *queue.Publisher
 }
 
 // New builds a Handler with its dependencies.
-func New(db *sql.DB) *Handler {
+func New(db *sql.DB, publisher *queue.Publisher) *Handler {
 	return &Handler{
-		DB:       db,
-		TestRuns: store.NewTestRunStore(db),
+		DB:        db,
+		TestRuns:  store.NewTestRunStore(db),
+		Publisher: publisher,
 	}
 }
 
@@ -36,7 +40,10 @@ func (h *Handler) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /test-runs/{id}", h.GetTestRun)
 
 	// Internal API (used by workers).
+	// Phase 2: workers receive a job id from Redis and call /start for that id.
+	// /workers/claim (the Phase 1 SKIP-LOCKED poll) is kept as a fallback.
 	mux.HandleFunc("POST /internal/workers/claim", h.ClaimNextRun)
+	mux.HandleFunc("POST /internal/test-runs/{id}/start", h.StartTestRun)
 	mux.HandleFunc("POST /internal/test-runs/{id}/complete", h.CompleteTestRun)
 
 	return mux

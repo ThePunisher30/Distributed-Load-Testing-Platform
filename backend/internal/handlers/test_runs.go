@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -51,6 +52,14 @@ func (h *Handler) CreateTestRun(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not create test run")
 		return
+	}
+
+	// Publish the job so a worker picks it up immediately. The queued row already
+	// exists in Postgres; if publishing fails, the run is created but won't be
+	// delivered until we add a fallback (the dual-write gap Phase 2 will address
+	// with an outbox). Log it rather than failing the request.
+	if err := h.Publisher.PublishJob(r.Context(), tr.ID); err != nil {
+		log.Printf("run %d created but failed to publish job: %v", tr.ID, err)
 	}
 
 	writeJSON(w, http.StatusCreated, tr)

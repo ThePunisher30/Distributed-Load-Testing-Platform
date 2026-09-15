@@ -170,6 +170,36 @@ func TestStore_ClaimNext(t *testing.T) {
 	}
 }
 
+func TestStore_StartByID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	run, _ := s.Create(ctx, sampleCreate("to-start"))
+
+	// A queued run starts and becomes running.
+	started, err := s.StartByID(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("StartByID: %v", err)
+	}
+	if started.Status != models.StatusRunning {
+		t.Errorf("status = %q, want running", started.Status)
+	}
+	if started.StartedAt == nil {
+		t.Error("startedAt should be set")
+	}
+
+	// Starting it AGAIN must fail: it is no longer queued. This is the
+	// idempotency guard that makes duplicate Redis delivery safe in Phase 2.
+	if _, err := s.StartByID(ctx, run.ID); !errors.Is(err, ErrNotQueued) {
+		t.Errorf("double-start error = %v, want ErrNotQueued", err)
+	}
+
+	// Starting a non-existent run must fail with ErrNotFound.
+	if _, err := s.StartByID(ctx, 999999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("start-missing error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestStore_Complete(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

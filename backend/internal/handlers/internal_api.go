@@ -30,6 +30,33 @@ func (h *Handler) ClaimNextRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, tr)
 }
 
+// StartTestRun handles POST /internal/test-runs/{id}/start. A worker calls it
+// after receiving a job from the queue, to atomically move that run to running
+// and get back its config. A duplicate delivery of an already-started run yields
+// 409 Conflict, telling the worker to skip it.
+func (h *Handler) StartTestRun(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, http.StatusBadRequest, "id must be a positive integer")
+		return
+	}
+
+	tr, err := h.TestRuns.StartByID(r.Context(), id)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "test run not found")
+		return
+	case errors.Is(err, store.ErrNotQueued):
+		writeError(w, http.StatusConflict, "test run is not queued")
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "could not start test run")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, tr)
+}
+
 // CompleteTestRun handles POST /internal/test-runs/{id}/complete. A worker calls
 // it to report the outcome of a run it previously claimed.
 func (h *Handler) CompleteTestRun(w http.ResponseWriter, r *http.Request) {

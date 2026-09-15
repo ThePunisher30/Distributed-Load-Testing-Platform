@@ -15,6 +15,7 @@ import (
 
 	"distributed-load-testing-platform/backend/internal/db"
 	"distributed-load-testing-platform/backend/internal/handlers"
+	"distributed-load-testing-platform/backend/internal/queue"
 )
 
 func main() {
@@ -23,6 +24,7 @@ func main() {
 	// with sensible local defaults.
 	dsn := getenv("DATABASE_URL", "postgres://dltp:dltp@localhost:5432/dltp?sslmode=disable")
 	addr := getenv("BACKEND_ADDR", ":8080")
+	redisAddr := getenv("REDIS_ADDR", "localhost:6379")
 
 	// A root context we cancel on shutdown so in-flight work can wind down.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -35,7 +37,14 @@ func main() {
 	defer pool.Close()
 	log.Println("connected to database")
 
-	h := handlers.New(pool)
+	rdb, err := queue.Connect(ctx, redisAddr)
+	if err != nil {
+		log.Fatalf("redis connection failed: %v", err)
+	}
+	defer rdb.Close()
+	log.Println("connected to redis")
+
+	h := handlers.New(pool, queue.NewPublisher(rdb))
 
 	server := &http.Server{
 		Addr:         addr,

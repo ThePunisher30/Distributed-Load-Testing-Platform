@@ -24,6 +24,11 @@ var ErrNoQueuedRuns = errors.New("no queued test runs")
 // but is not currently in the running state. Handlers map this to a 409.
 var ErrNotRunning = errors.New("test run is not running")
 
+// ErrNotQueued is returned by StartByID when a run exists but is not queued
+// (e.g. a duplicate job delivery for a run already started). Handlers map this
+// to a 409.
+var ErrNotQueued = errors.New("test run is not queued")
+
 // TestRunStore runs queries against the test_runs table.
 type TestRunStore struct {
 	db *sql.DB
@@ -129,6 +134,35 @@ func (s *TestRunStore) ClaimNext(ctx context.Context) (*models.TestRun, error) {
 	}
 	if err != nil {
 		return nil, fmt.Errorf("claim next test run: %w", err)
+	}
+	return tr, nil
+}
+
+// StartByID transitions one specific queued run to running and returns it. It is
+// the Phase 2 counterpart of ClaimNext: instead of the worker polling for the
+// next queued run, the broker hands it a run id, and the worker starts THAT run.
+//
+// The `WHERE status = 'queued'` guard makes it idempotent — the key property for
+// at-least-once delivery. If the broker delivers the same job twice, the second
+// StartByID matches no row (the run is already running/completed), so we return
+// ErrNotQueued and the worker knows to skip it. A missing id returns ErrNotFound.
+func (s *TestRunStore) StartByID(ctx context.Context, id int64) (*models.TestRun, error) {
+	query := `
+		UPDATE test_runs
+		SET status = 'running', started_at = now()
+		WHERE id = $1 AND status = 'queued'
+		RETURNING ` + testRunColumns
+
+	tr, err := scanRow(s.db.QueryRowContext(ctx, query, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		// Nothing updated: distinguish "does not exist" from "not queued".
+		if _, getErr := s.GetByID(ctx, id); errors.Is(getErr, ErrNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, ErrNotQueued
+	}
+	if err != nil {
+		return nil, fmt.Errorf("start test run: %w", err)
 	}
 	return tr, nil
 }
