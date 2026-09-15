@@ -200,6 +200,32 @@ func (s *TestRunStore) TakeOver(ctx context.Context, id int64) (*models.TestRun,
 	return tr, nil
 }
 
+// Fail marks a run as failed with a reason, regardless of whether it was queued
+// or running. It is used to dead-letter a job that could not be processed after
+// too many delivery attempts. A run that is already terminal (completed/failed)
+// is returned unchanged; a missing run is ErrNotFound.
+func (s *TestRunStore) Fail(ctx context.Context, id int64, reason string) (*models.TestRun, error) {
+	query := `
+		UPDATE test_runs
+		SET status = 'failed', error_message = $2, completed_at = now()
+		WHERE id = $1 AND status IN ('queued', 'running')
+		RETURNING ` + testRunColumns
+
+	tr, err := scanRow(s.db.QueryRowContext(ctx, query, id, reason))
+	if errors.Is(err, sql.ErrNoRows) {
+		// Nothing updated: already terminal, or missing.
+		existing, getErr := s.GetByID(ctx, id)
+		if getErr != nil {
+			return nil, getErr // ErrNotFound or a real error
+		}
+		return existing, nil // already completed/failed; leave as-is
+	}
+	if err != nil {
+		return nil, fmt.Errorf("fail test run: %w", err)
+	}
+	return tr, nil
+}
+
 // Complete records the outcome of a run and returns the updated row. The status
 // must be "completed" or "failed". The WHERE guard (status = 'running') ensures
 // only a claimed, in-progress run can be completed; if nothing is updated we

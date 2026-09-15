@@ -237,6 +237,33 @@ func TestStore_TakeOver(t *testing.T) {
 	}
 }
 
+func TestStore_Fail(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// A queued run can be failed directly (dead-lettered before it ever started).
+	q, _ := s.Create(ctx, sampleCreate("fail-queued"))
+	got, err := s.Fail(ctx, q.ID, "dead-lettered")
+	if err != nil {
+		t.Fatalf("Fail(queued): %v", err)
+	}
+	if got.Status != models.StatusFailed || got.ErrorMessage == nil || *got.ErrorMessage != "dead-lettered" {
+		t.Errorf("Fail(queued) = %+v, want failed with reason", got)
+	}
+
+	// A running run can be failed too.
+	r, _ := s.Create(ctx, sampleCreate("fail-running"))
+	s.StartByID(ctx, r.ID)
+	if got, err := s.Fail(ctx, r.ID, "x"); err != nil || got.Status != models.StatusFailed {
+		t.Errorf("Fail(running) = (%v, %v), want failed", got, err)
+	}
+
+	// A missing run is ErrNotFound.
+	if _, err := s.Fail(ctx, 999999, "x"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Fail(missing) error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestStore_Complete(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

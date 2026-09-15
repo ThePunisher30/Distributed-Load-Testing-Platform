@@ -143,6 +143,33 @@ func (c *Client) TakeOverRun(ctx context.Context, id int64) (*TestRun, bool, err
 	}
 }
 
+// FailRun marks a run as failed with a reason. The worker calls it when
+// dead-lettering a job that could not be processed after too many attempts.
+func (c *Client) FailRun(ctx context.Context, id int64, reason string) error {
+	payload, err := json.Marshal(map[string]string{"errorMessage": reason})
+	if err != nil {
+		return err
+	}
+
+	url := c.baseURL + "/internal/test-runs/" + strconv.FormatInt(id, 10) + "/fail"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("fail request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("fail returned status %s: %s", resp.Status, readBody(resp.Body))
+	}
+	return nil
+}
+
 // Complete reports the outcome of a run the worker executed.
 func (c *Client) Complete(ctx context.Context, id int64, body CompleteRequest) error {
 	payload, err := json.Marshal(body)

@@ -83,6 +83,42 @@ func (h *Handler) TakeoverTestRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, tr)
 }
 
+// FailTestRun handles POST /internal/test-runs/{id}/fail. A worker calls it when
+// dead-lettering a job that could not be processed after too many attempts, to
+// mark the run failed with a reason no matter what state it was in.
+func (h *Handler) FailTestRun(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, http.StatusBadRequest, "id must be a positive integer")
+		return
+	}
+
+	var req struct {
+		ErrorMessage string `json:"errorMessage"`
+	}
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if req.ErrorMessage == "" {
+		req.ErrorMessage = "run failed"
+	}
+
+	tr, err := h.TestRuns.Fail(r.Context(), id, req.ErrorMessage)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "test run not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not fail test run")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, tr)
+}
+
 // CompleteTestRun handles POST /internal/test-runs/{id}/complete. A worker calls
 // it to report the outcome of a run it previously claimed.
 func (h *Handler) CompleteTestRun(w http.ResponseWriter, r *http.Request) {

@@ -22,8 +22,9 @@ import (
 )
 
 const (
-	streamKey = "testruns" // the stream the backend publishes jobs to
-	groupName = "workers"  // the consumer group all workers share
+	streamKey     = "testruns"      // the stream the backend publishes jobs to
+	groupName     = "workers"       // the consumer group all workers share
+	deadStreamKey = "testruns:dead" // where jobs that keep failing are set aside
 )
 
 func main() {
@@ -32,6 +33,9 @@ func main() {
 	// A message unacked longer than this is presumed orphaned (its worker died)
 	// and is reclaimed. Must exceed the longest job a worker can be processing.
 	reclaimMinIdle := getdur("RECLAIM_MIN_IDLE", 30*time.Second)
+	// A message delivered more than this many times is dead-lettered instead of
+	// retried again (a poison job that can never be processed).
+	maxDeliveries := getint("MAX_DELIVERIES", 5)
 
 	// Cancel the root context on Ctrl-C / SIGTERM so an in-flight run can stop.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -65,7 +69,7 @@ func main() {
 		}
 
 		// First reclaim any message a crashed worker left unacked past the timeout.
-		reclaimStuck(ctx, c, rdb, consumerName, reclaimMinIdle)
+		reclaimStuck(ctx, c, rdb, consumerName, reclaimMinIdle, maxDeliveries)
 
 		// Block up to 5s waiting for a message not yet delivered to the group (">").
 		res, err := rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
@@ -94,28 +98,85 @@ func main() {
 	}
 }
 
-// reclaimStuck claims messages that have been pending (unacked) longer than
-// minIdle -- the signal that the worker holding them has died -- and reprocesses
-// them as reclaimed jobs. XAUTOCLAIM reassigns such messages to this consumer.
-func reclaimStuck(ctx context.Context, c *client.Client, rdb *redis.Client, consumer string, minIdle time.Duration) {
-	msgs, _, err := rdb.XAutoClaim(ctx, &redis.XAutoClaimArgs{
-		Stream:   streamKey,
-		Group:    groupName,
-		Consumer: consumer,
-		MinIdle:  minIdle,
-		Start:    "0",
-		Count:    10,
+// reclaimStuck finds messages pending (unacked) longer than minIdle -- the
+// signal that the worker holding them has died -- and either reprocesses them or,
+// if they have already been delivered too many times (a poison job), dead-letters
+// them. We use XPENDING (not XAUTOCLAIM) because it reports each message's
+// delivery count, which is what decides retry vs dead-letter.
+func reclaimStuck(ctx context.Context, c *client.Client, rdb *redis.Client, consumer string, minIdle time.Duration, maxDeliveries int) {
+	pending, err := rdb.XPendingExt(ctx, &redis.XPendingExtArgs{
+		Stream: streamKey,
+		Group:  groupName,
+		Idle:   minIdle,
+		Start:  "-",
+		End:    "+",
+		Count:  20,
 	}).Result()
 	if err != nil {
-		if !errors.Is(err, redis.Nil) && ctx.Err() == nil {
-			log.Printf("reclaim (XAUTOCLAIM) failed: %v", err)
+		if ctx.Err() == nil {
+			log.Printf("reclaim scan (XPENDING) failed: %v", err)
 		}
 		return
 	}
-	for _, msg := range msgs {
-		log.Printf("reclaiming idle message %s (its worker is presumed dead)", msg.ID)
-		handleMessage(ctx, c, rdb, msg, true)
+
+	for _, p := range pending {
+		if p.RetryCount > int64(maxDeliveries) {
+			deadLetter(ctx, c, rdb, p.ID, p.RetryCount)
+			continue
+		}
+
+		// Claim it to this consumer, then reprocess it as a reclaimed job.
+		msgs, err := rdb.XClaim(ctx, &redis.XClaimArgs{
+			Stream:   streamKey,
+			Group:    groupName,
+			Consumer: consumer,
+			MinIdle:  minIdle,
+			Messages: []string{p.ID},
+		}).Result()
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Printf("reclaim (XCLAIM %s) failed: %v", p.ID, err)
+			}
+			continue
+		}
+		for _, msg := range msgs {
+			log.Printf("reclaiming idle message %s (delivery %d) — its worker is presumed dead", msg.ID, p.RetryCount)
+			handleMessage(ctx, c, rdb, msg, true)
+		}
 	}
+}
+
+// deadLetter sets aside a job that has been delivered too many times: it copies
+// the message to the dead-letter stream, marks the run failed, and acks the
+// original so it stops being redelivered.
+func deadLetter(ctx context.Context, c *client.Client, rdb *redis.Client, msgID string, deliveries int64) {
+	var runID int64
+	if msgs, err := rdb.XRange(ctx, streamKey, msgID, msgID).Result(); err == nil && len(msgs) == 1 {
+		if s, ok := msgs[0].Values["run_id"].(string); ok {
+			runID, _ = strconv.ParseInt(s, 10, 64)
+		}
+	}
+	log.Printf("dead-lettering message %s (run %d) after %d deliveries", msgID, runID, deliveries)
+
+	// Keep a copy in the dead-letter stream for later inspection.
+	rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: deadStreamKey,
+		Values: map[string]any{
+			"run_id":     strconv.FormatInt(runID, 10),
+			"orig_id":    msgID,
+			"deliveries": deliveries,
+		},
+	})
+
+	// Mark the run failed so it doesn't linger in a non-terminal state.
+	if runID > 0 {
+		if err := c.FailRun(ctx, runID, "dead-lettered after too many delivery attempts"); err != nil {
+			log.Printf("dead-letter: could not mark run %d failed: %v", runID, err)
+		}
+	}
+
+	// Ack the original so it leaves the group's pending list for good.
+	ack(ctx, rdb, msgID)
 }
 
 // handleMessage processes one job: start the run, execute it, report the result,
@@ -222,6 +283,17 @@ func getdur(key string, fallback time.Duration) time.Duration {
 			return d
 		}
 		log.Printf("invalid %s=%q, using default %s", key, v, fallback)
+	}
+	return fallback
+}
+
+// getint parses an integer env var, falling back on unset/invalid.
+func getint(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+		log.Printf("invalid %s=%q, using default %d", key, v, fallback)
 	}
 	return fallback
 }

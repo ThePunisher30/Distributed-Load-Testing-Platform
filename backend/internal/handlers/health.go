@@ -45,6 +45,7 @@ func (h *Handler) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /internal/workers/claim", h.ClaimNextRun)
 	mux.HandleFunc("POST /internal/test-runs/{id}/start", h.StartTestRun)
 	mux.HandleFunc("POST /internal/test-runs/{id}/takeover", h.TakeoverTestRun)
+	mux.HandleFunc("POST /internal/test-runs/{id}/fail", h.FailTestRun)
 	mux.HandleFunc("POST /internal/test-runs/{id}/complete", h.CompleteTestRun)
 
 	return mux
