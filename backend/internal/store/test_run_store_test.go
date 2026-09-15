@@ -200,6 +200,43 @@ func TestStore_StartByID(t *testing.T) {
 	}
 }
 
+func TestStore_TakeOver(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// TakeOver accepts a queued run.
+	q, _ := s.Create(ctx, sampleCreate("queued-takeover"))
+	if got, err := s.TakeOver(ctx, q.ID); err != nil || got.Status != models.StatusRunning {
+		t.Errorf("TakeOver(queued) = (%v, %v), want running, nil", got, err)
+	}
+
+	// TakeOver also accepts an already-running run (the crash-recovery case):
+	// the previous worker died mid-execution, so we re-claim it.
+	r, _ := s.Create(ctx, sampleCreate("running-takeover"))
+	if _, err := s.StartByID(ctx, r.ID); err != nil { // now running
+		t.Fatalf("StartByID: %v", err)
+	}
+	if got, err := s.TakeOver(ctx, r.ID); err != nil || got.Status != models.StatusRunning {
+		t.Errorf("TakeOver(running) = (%v, %v), want running, nil", got, err)
+	}
+
+	// A completed run is left alone: nothing to re-run.
+	done, _ := s.Create(ctx, sampleCreate("done-takeover"))
+	s.StartByID(ctx, done.ID)
+	s.Complete(ctx, done.ID, models.CompleteTestRunRequest{
+		Status: models.StatusCompleted, TotalRequests: ptr(int64(1)),
+		SuccessfulRequests: ptr(int64(1)), FailedRequests: ptr(int64(0)),
+	})
+	if _, err := s.TakeOver(ctx, done.ID); !errors.Is(err, ErrAlreadyDone) {
+		t.Errorf("TakeOver(completed) error = %v, want ErrAlreadyDone", err)
+	}
+
+	// A missing run is ErrNotFound.
+	if _, err := s.TakeOver(ctx, 999999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("TakeOver(missing) error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestStore_Complete(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

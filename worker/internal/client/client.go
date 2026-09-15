@@ -112,6 +112,37 @@ func (c *Client) StartRun(ctx context.Context, id int64) (*TestRun, bool, error)
 	}
 }
 
+// TakeOverRun claims a run whose message this worker reclaimed after it sat idle
+// (its previous worker is presumed dead). Unlike StartRun it succeeds even if the
+// run is already "running". The bool is "taken": false means the run is already
+// completed/failed or gone, so the worker should ack and skip.
+func (c *Client) TakeOverRun(ctx context.Context, id int64) (*TestRun, bool, error) {
+	url := c.baseURL + "/internal/test-runs/" + strconv.FormatInt(id, 10) + "/takeover"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return nil, false, err
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, false, fmt.Errorf("takeover request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var run TestRun
+		if err := json.NewDecoder(resp.Body).Decode(&run); err != nil {
+			return nil, false, fmt.Errorf("decode taken-over run: %w", err)
+		}
+		return &run, true, nil
+	case http.StatusConflict, http.StatusNotFound:
+		return nil, false, nil // already done or gone
+	default:
+		return nil, false, fmt.Errorf("takeover returned unexpected status %s: %s", resp.Status, readBody(resp.Body))
+	}
+}
+
 // Complete reports the outcome of a run the worker executed.
 func (c *Client) Complete(ctx context.Context, id int64, body CompleteRequest) error {
 	payload, err := json.Marshal(body)

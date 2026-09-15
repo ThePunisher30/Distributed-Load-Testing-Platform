@@ -29,6 +29,10 @@ var ErrNotRunning = errors.New("test run is not running")
 // to a 409.
 var ErrNotQueued = errors.New("test run is not queued")
 
+// ErrAlreadyDone is returned by TakeOver when a reclaimed run is already
+// completed or failed, so there is nothing to re-run. Handlers map this to 409.
+var ErrAlreadyDone = errors.New("test run is already completed or failed")
+
 // TestRunStore runs queries against the test_runs table.
 type TestRunStore struct {
 	db *sql.DB
@@ -163,6 +167,35 @@ func (s *TestRunStore) StartByID(ctx context.Context, id int64) (*models.TestRun
 	}
 	if err != nil {
 		return nil, fmt.Errorf("start test run: %w", err)
+	}
+	return tr, nil
+}
+
+// TakeOver claims a run whose Redis message was reclaimed after being idle too
+// long (its previous worker is presumed dead). Unlike StartByID, it accepts a
+// run that is already 'running' and re-stamps it, so a worker that crashed
+// mid-execution can be recovered. A run that is already 'completed' or 'failed'
+// is left alone (ErrAlreadyDone); a missing run is ErrNotFound.
+//
+// This is deliberately more permissive than StartByID: it is only ever called
+// for a message that has sat unacked past the reclaim timeout, which is the
+// signal that the run really is orphaned rather than actively in progress.
+func (s *TestRunStore) TakeOver(ctx context.Context, id int64) (*models.TestRun, error) {
+	query := `
+		UPDATE test_runs
+		SET status = 'running', started_at = now()
+		WHERE id = $1 AND status IN ('queued', 'running')
+		RETURNING ` + testRunColumns
+
+	tr, err := scanRow(s.db.QueryRowContext(ctx, query, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		if _, getErr := s.GetByID(ctx, id); errors.Is(getErr, ErrNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, ErrAlreadyDone // completed or failed already
+	}
+	if err != nil {
+		return nil, fmt.Errorf("take over test run: %w", err)
 	}
 	return tr, nil
 }

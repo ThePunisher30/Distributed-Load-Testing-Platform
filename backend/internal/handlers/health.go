@@ -44,6 +44,7 @@ func (h *Handler) Routes() *http.ServeMux {
 	// /workers/claim (the Phase 1 SKIP-LOCKED poll) is kept as a fallback.
 	mux.HandleFunc("POST /internal/workers/claim", h.ClaimNextRun)
 	mux.HandleFunc("POST /internal/test-runs/{id}/start", h.StartTestRun)
+	mux.HandleFunc("POST /internal/test-runs/{id}/takeover", h.TakeoverTestRun)
 	mux.HandleFunc("POST /internal/test-runs/{id}/complete", h.CompleteTestRun)
 
 	return mux

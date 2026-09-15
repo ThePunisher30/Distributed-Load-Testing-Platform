@@ -29,6 +29,9 @@ const (
 func main() {
 	backendURL := getenv("BACKEND_URL", "http://localhost:8080")
 	redisAddr := getenv("REDIS_ADDR", "localhost:6379")
+	// A message unacked longer than this is presumed orphaned (its worker died)
+	// and is reclaimed. Must exceed the longest job a worker can be processing.
+	reclaimMinIdle := getdur("RECLAIM_MIN_IDLE", 30*time.Second)
 
 	// Cancel the root context on Ctrl-C / SIGTERM so an in-flight run can stop.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -61,6 +64,9 @@ func main() {
 			return
 		}
 
+		// First reclaim any message a crashed worker left unacked past the timeout.
+		reclaimStuck(ctx, c, rdb, consumerName, reclaimMinIdle)
+
 		// Block up to 5s waiting for a message not yet delivered to the group (">").
 		res, err := rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
 			Group:    groupName,
@@ -82,9 +88,33 @@ func main() {
 
 		for _, stream := range res {
 			for _, msg := range stream.Messages {
-				handleMessage(ctx, c, rdb, msg)
+				handleMessage(ctx, c, rdb, msg, false)
 			}
 		}
+	}
+}
+
+// reclaimStuck claims messages that have been pending (unacked) longer than
+// minIdle -- the signal that the worker holding them has died -- and reprocesses
+// them as reclaimed jobs. XAUTOCLAIM reassigns such messages to this consumer.
+func reclaimStuck(ctx context.Context, c *client.Client, rdb *redis.Client, consumer string, minIdle time.Duration) {
+	msgs, _, err := rdb.XAutoClaim(ctx, &redis.XAutoClaimArgs{
+		Stream:   streamKey,
+		Group:    groupName,
+		Consumer: consumer,
+		MinIdle:  minIdle,
+		Start:    "0",
+		Count:    10,
+	}).Result()
+	if err != nil {
+		if !errors.Is(err, redis.Nil) && ctx.Err() == nil {
+			log.Printf("reclaim (XAUTOCLAIM) failed: %v", err)
+		}
+		return
+	}
+	for _, msg := range msgs {
+		log.Printf("reclaiming idle message %s (its worker is presumed dead)", msg.ID)
+		handleMessage(ctx, c, rdb, msg, true)
 	}
 }
 
@@ -92,7 +122,7 @@ func main() {
 // then acknowledge the message. Acking removes the message from the group's
 // pending list so it is not redelivered. On a transient failure we deliberately
 // do NOT ack, so the message stays pending and can be retried/reclaimed later.
-func handleMessage(ctx context.Context, c *client.Client, rdb *redis.Client, msg redis.XMessage) {
+func handleMessage(ctx context.Context, c *client.Client, rdb *redis.Client, msg redis.XMessage, reclaimed bool) {
 	idStr, _ := msg.Values["run_id"].(string)
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
@@ -102,16 +132,24 @@ func handleMessage(ctx context.Context, c *client.Client, rdb *redis.Client, msg
 		return
 	}
 
-	run, ok, err := c.StartRun(ctx, id)
+	// A reclaimed job may have been left mid-run, so it can take over a 'running'
+	// run; a normal delivery only starts a 'queued' run (rejecting duplicates).
+	var run *client.TestRun
+	var ok bool
+	if reclaimed {
+		run, ok, err = c.TakeOverRun(ctx, id)
+	} else {
+		run, ok, err = c.StartRun(ctx, id)
+	}
 	if err != nil {
 		// Transient (backend unreachable, etc.): leave unacked so it is retried.
-		log.Printf("start run %d failed: %v (leaving message pending for retry)", id, err)
+		log.Printf("claim run %d failed: %v (leaving message pending for retry)", id, err)
 		return
 	}
 	if !ok {
-		// Already started/completed (duplicate delivery) or gone: nothing to do.
+		// Already done (duplicate/finished) or gone: nothing to do. Ack and skip.
 		// Ack it — this is idempotency in action.
-		log.Printf("run %d not startable (duplicate or missing); acking", id)
+		log.Printf("run %d not claimable (duplicate/finished/missing); acking", id)
 		ack(ctx, rdb, msg.ID)
 		return
 	}
@@ -173,6 +211,17 @@ func executeRun(ctx context.Context, run *client.TestRun) client.CompleteRequest
 func getenv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+// getdur parses a duration env var (e.g. "30s"), falling back on unset/invalid.
+func getdur(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+		log.Printf("invalid %s=%q, using default %s", key, v, fallback)
 	}
 	return fallback
 }

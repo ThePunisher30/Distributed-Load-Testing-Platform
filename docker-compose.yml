@@ -59,6 +59,9 @@ services:
       # Reach the backend and broker by service name.
       BACKEND_URL: http://backend:8080
       REDIS_ADDR: redis:6379
+      # Reclaim a message unacked this long (short here since demo runs are brief;
+      # in production this must exceed the longest possible job).
+      RECLAIM_MIN_IDLE: 10s
     depends_on:
       backend:
         condition: service_healthy

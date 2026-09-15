@@ -57,6 +57,32 @@ func (h *Handler) StartTestRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, tr)
 }
 
+// TakeoverTestRun handles POST /internal/test-runs/{id}/takeover. A worker calls
+// it when it reclaims an idle (orphaned) message, to take over a run that may
+// already be 'running' from a crashed worker. An already-finished run yields 409.
+func (h *Handler) TakeoverTestRun(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, http.StatusBadRequest, "id must be a positive integer")
+		return
+	}
+
+	tr, err := h.TestRuns.TakeOver(r.Context(), id)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "test run not found")
+		return
+	case errors.Is(err, store.ErrAlreadyDone):
+		writeError(w, http.StatusConflict, "test run is already completed or failed")
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "could not take over test run")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, tr)
+}
+
 // CompleteTestRun handles POST /internal/test-runs/{id}/complete. A worker calls
 // it to report the outcome of a run it previously claimed.
 func (h *Handler) CompleteTestRun(w http.ResponseWriter, r *http.Request) {
