@@ -31,7 +31,13 @@ func main() {
 	backendURL := getenv("BACKEND_URL", "http://localhost:8080")
 	redisAddr := getenv("REDIS_ADDR", "localhost:6379")
 	// A message unacked longer than this is presumed orphaned (its worker died)
-	// and is reclaimed. Must exceed the longest job a worker can be processing.
+	// and is reclaimed. CAVEAT: this MUST exceed the longest job a worker can be
+	// processing. A running worker does not ack until its job finishes, so its
+	// in-flight message looks "idle" the whole time; if reclaimMinIdle is shorter
+	// than the job, another live worker will reclaim a job that is still running,
+	// causing double execution. Idempotency (the state-guarded complete) keeps the
+	// stored result correct, but the work is wasted. The proper fix is a
+	// heartbeat/lease that refreshes the claim during a long job (Phase 6).
 	reclaimMinIdle := getdur("RECLAIM_MIN_IDLE", 30*time.Second)
 	// A message delivered more than this many times is dead-lettered instead of
 	// retried again (a poison job that can never be processed).
@@ -57,9 +63,15 @@ func main() {
 		log.Fatalf("create consumer group: %v", err)
 	}
 
-	// A unique consumer name within the group. With multiple workers (Phase 3),
-	// the group load-balances messages across distinct consumer names.
-	consumerName := "worker-" + strconv.Itoa(os.Getpid())
+	// A unique consumer name within the group. Each worker must have a distinct
+	// name so the group load-balances across them and tracks pending messages per
+	// worker (which reclaim relies on). In a container the hostname is the unique
+	// container id; PID is a fallback (it is always 1 inside a container).
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = strconv.Itoa(os.Getpid())
+	}
+	consumerName := "worker-" + host
 	log.Printf("worker started; consuming %q from redis %s as %q", streamKey, redisAddr, consumerName)
 
 	for {

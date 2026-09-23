@@ -54,7 +54,8 @@ services:
 
   worker:
     build: ./worker
-    container_name: dltp-worker
+    # No container_name: it must be scalable (docker compose up --scale worker=N),
+    # and a fixed name would collide across replicas.
     environment:
       # Reach the backend and broker by service name.
       BACKEND_URL: http://backend:8080
