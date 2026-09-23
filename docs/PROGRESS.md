@@ -877,22 +877,69 @@ A normal run still completes unaffected.
 Learning: poison-message handling; a delivery-count cap prevents infinite retries.
 ```
 
+## Phase 3: Multiple Workers
+
+### Level 0: run worker replicas (horizontal scale for concurrent runs)
+
+The worker is now horizontally scalable: several identical replicas share the one
+Redis consumer group, so different runs process in parallel. No coordination code
+was needed -- the consumer group already load-balances whole jobs across
+consumers. A single run still runs entirely on one worker (splitting one run
+across workers is Level 1, below).
+
+Changes:
+- worker: consumer name derived from the hostname instead of the PID. In a
+  container the PID is always 1, so PID-based names collided across replicas and
+  broke both load-balancing and per-consumer reclaim tracking. Hostname is the
+  unique container id (PID kept as a fallback outside containers).
+- docker-compose: removed the worker's fixed container_name so it can be scaled.
+
+Run it:
+
+```powershell
+docker compose up -d --build --scale worker=3
+```
+
+Verification:
+
+```text
+3 replicas registered as 3 distinct consumers; a burst of 6 runs split 2/2/2
+across them, running in parallel. Cross-worker recovery: killing the worker
+running a job (SIGKILL) let a DIFFERENT replica reclaim and finish it
+(run completed, XPENDING 0).
+Learning: a consumer group turns "add workers" into near-free horizontal scale;
+each job still goes to exactly one worker.
+```
+
+Caveat found during the demo (recorded in worker main.go):
+
+```text
+Reclaim's idle timeout (RECLAIM_MIN_IDLE) MUST exceed the longest job. A running
+worker does not ack until its job finishes, so its in-flight message looks idle;
+if the timeout is shorter than the job, another live worker reclaims a job that is
+still running -> DOUBLE execution. Idempotency (the state-guarded complete) keeps
+the stored result correct, but the work is wasted. The 10s demo timeout against a
+20s job triggered exactly this. Proper fix: a heartbeat/lease that refreshes the
+claim during a long job (Phase 6).
+```
+
 ## Current System State
 
 ```text
-Whole platform runs in Docker Compose: postgres + redis + backend + worker +
-target. Jobs are distributed via a Redis Streams consumer group (no polling),
-with crash recovery (reclaim) and dead-lettering. End-to-end lifecycle runs on
-its own with REAL load results.
+Whole platform runs in Docker Compose: postgres + redis + backend + N worker
+replicas + target. Jobs are distributed via a Redis Streams consumer group (no
+polling), load-balanced across workers, with crash recovery (reclaim) and
+dead-lettering. End-to-end lifecycle runs on its own with REAL load results.
 ```
 
-Phases 1 and 2 are COMPLETE.
+Phases 1 and 2 are COMPLETE. Phase 3 Level 0 (worker replicas) is done; Level 1
+(splitting one run across workers) is not yet built.
 
 Known follow-ups (not blocking):
 
 ```text
-- Worker consumer name is PID-based (collides inside containers, all PID 1);
-  make it unique (hostname) for Phase 3 multi-worker.
+- Reclaim timeout must exceed job duration until a heartbeat/lease is added
+  (Phase 6); otherwise a long in-flight job can be reclaimed and run twice.
 - Dual-write gap: if the INSERT succeeds but XADD fails, the run is queued with
   no message and won't be delivered (add an outbox pattern later).
 - Percentiles (p50/p95/p99), headers/body, non-GET methods, think-time (Phase 5).
@@ -900,12 +947,14 @@ Known follow-ups (not blocking):
 
 ## Next Step
 
-Phase 3: Multiple Workers.
+Phase 3 Level 1: split ONE run across multiple workers.
 
 ```text
-Run several worker replicas. The Redis consumer group already load-balances
-messages across them, and reclaim already recovers a dead worker's job. Main
-work: unique consumer names (hostname), verify parallel claim + reclaim across
-workers, then optionally split one large run across multiple workers.
+e.g. 1,000 virtual users as 250 x 4 workers, then re-aggregate. Needs: worker
+registration + heartbeat, assignment splitting at dispatch, per-worker partial
+results (a worker_assignments table), distributed re-aggregation (the mergeStats
+math generalizes), and a completion barrier ("all N partials in") with partial-
+failure states. The consumer group, reclaim, and aggregation math from Phases 1-2
+already do most of the groundwork.
 ```
 

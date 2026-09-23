@@ -57,6 +57,12 @@ Everything runs in Docker Compose:
 docker compose up --build
 ```
 
+Run several worker replicas — the Redis consumer group load-balances runs across them:
+
+```bash
+docker compose up -d --build --scale worker=3
+```
+
 Create a test run (from the host):
 
 ```bash
@@ -107,11 +113,11 @@ Current:
 - Go — backend, worker, target service, and the custom runner
 - PostgreSQL — persistent storage and source of truth
 - Redis Streams — job-distribution message broker (consumer groups, reclaim, dead-letter)
-- Docker Compose — local infrastructure, one-command startup
+- Docker Compose — local infrastructure, one-command startup; scale workers with `--scale worker=N` (they share the consumer group)
 
 Planned for later phases:
 
-- Multiple workers (Phase 3)
+- Splitting a single run across workers — 1,000 VUs as 250×4 (Phase 3, Level 1)
 - Prometheus + Grafana or a custom dashboard for live metrics (Phases 4 / 7)
 - Richer runner: percentiles, request bodies, more HTTP methods, think time (Phase 5)
 - Authentication, quotas, and target allowlists (Phase 8)
