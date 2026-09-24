@@ -923,17 +923,101 @@ the stored result correct, but the work is wasted. The 10s demo timeout against 
 claim during a long job (Phase 6).
 ```
 
+### Level 1: split ONE run across workers (sharding)
+
+A single run is now fanned out into N shards, each a slice of the virtual users,
+so several workers execute one run in parallel. When the last shard finishes, the
+per-shard partial results are aggregated back into the run. A run with `shards=1`
+is exactly the old single-worker path, so the change is backward compatible.
+
+Files:
+
+```text
+migrations/002_create_test_run_shards.sql   shard_count column + test_run_shards
+backend/internal/models/test_run.go          ShardAssignment, CompleteShardRequest,
+                                              ShardCount / Shards fields
+backend/internal/store/test_run_store.go     CreateWithShards, StartShard,
+                                              TakeOverShard, CompleteShard, FailShard,
+                                              aggregateRun (the completion barrier)
+backend/internal/queue/publisher.go          PublishShard (one job per shard)
+backend/internal/handlers/test_runs.go       splitVUs + fan-out on create
+backend/internal/handlers/internal_api.go    /internal/shards/{id}/{start,takeover,
+                                              complete,fail}
+worker/cmd/worker/main.go                     consume shard jobs, take over reclaimed
+                                              shards, dead-letter poison shards
+worker/internal/client/client.go             shard client calls
+worker/internal/runner/runner.go             Result.LatencyCount (for weighting)
+```
+
+Design points:
+
+- Fan-out is one transaction: insert the run with `shard_count = N` and N
+  `test_run_shards` rows, then publish one job per shard. `splitVUs` divides the
+  VUs evenly and hands the remainder to the first few shards (e.g. 20 VUs / 4 =
+  5,5,5,5; 10 VUs / 3 = 4,3,3).
+- Each shard has its own lifecycle (`queued -> running -> completed|failed`),
+  driven exactly like a run was: `StartShard` (strict, queued-only) for a normal
+  delivery, `TakeOverShard` (accepts a still-`running` shard) for a reclaim.
+- Completion barrier: `CompleteShard`/`FailShard` records the shard's partial,
+  then counts how many shards are still non-terminal. Only when that count hits
+  zero does it aggregate the run and flip it to completed. The aggregate is
+  guarded by `WHERE status='running'`, so exactly one shard "wins" the barrier.
+- Aggregation is a WEIGHTED average, not an average of averages:
+  `avg = SUM(shard_avg * shard_latency_count) / SUM(shard_latency_count)`, with
+  min = MIN of shard mins and max = MAX of shard maxs (mins filtered to shards
+  that actually recorded a sample). `LatencyCount` travels from runner to shard
+  row precisely so this weighting is correct.
+
+Learning point:
+
+```text
+Splitting work is the easy half; recombining it correctly is the hard half. The
+completion barrier ("aggregate only when the last shard is terminal") plus a
+state-guarded aggregate makes the fan-in safe under concurrency and duplicate
+delivery. Averaging averages is wrong when shards do different amounts of work --
+weight each shard's average by its sample count.
+```
+
+Verification (3 worker replicas, run created from the host):
+
+```text
+Backward compat: a run with shards=1 completes unchanged on one worker.
+Fan-out: a run with 40 VUs / 4 shards split across 3 workers (one worker ran two
+shards); the run aggregated to totalRequests 193864 -- the exact sum of the four
+shard partials.
+```
+
+Cross-worker shard reclaim (kill a worker mid-shard):
+
+```text
+Run 25: 20 VUs / 4 shards (6s each). Worker A was SIGKILLed while running shard 1
+(its row left 'running', its Redis message stuck pending). ~10s later a DIFFERENT
+replica saw the idle message, XCLAIMed it, took it over (TakeOverShard on a
+running shard), re-ran it, and reported it. The barrier held the run open until
+all 4 shards were terminal, then aggregated: all shards completed, run completed,
+totalRequests = exact sum of the four partials. No shard lost.
+```
+
+Note (deliberately clean demo): 6s shards under the 10s reclaim window mean the
+healthy shards ack well before anything can reclaim them, so only the genuinely
+orphaned shard crosses the idle threshold. That is the flip-side of the Level 0
+caveat: short jobs -> reclaim fires only on real deaths; long jobs (> the idle
+timeout) -> healthy shards also look idle and get double-run (correct but wasted)
+until the Phase 6 heartbeat/lease.
+
 ## Current System State
 
 ```text
 Whole platform runs in Docker Compose: postgres + redis + backend + N worker
 replicas + target. Jobs are distributed via a Redis Streams consumer group (no
 polling), load-balanced across workers, with crash recovery (reclaim) and
-dead-lettering. End-to-end lifecycle runs on its own with REAL load results.
+dead-lettering. A single run is fanned out into shards that run in parallel across
+workers and are re-aggregated on completion. End-to-end lifecycle runs on its own
+with REAL load results.
 ```
 
-Phases 1 and 2 are COMPLETE. Phase 3 Level 0 (worker replicas) is done; Level 1
-(splitting one run across workers) is not yet built.
+Phases 1, 2, and 3 are COMPLETE. Phase 3 covers both Level 0 (worker replicas for
+concurrent runs) and Level 1 (splitting one run across workers via shards).
 
 Known follow-ups (not blocking):
 
@@ -947,14 +1031,15 @@ Known follow-ups (not blocking):
 
 ## Next Step
 
-Phase 3 Level 1: split ONE run across multiple workers.
+Phase 4: live metrics / observability.
 
 ```text
-e.g. 1,000 virtual users as 250 x 4 workers, then re-aggregate. Needs: worker
-registration + heartbeat, assignment splitting at dispatch, per-worker partial
-results (a worker_assignments table), distributed re-aggregation (the mergeStats
-math generalizes), and a completion barrier ("all N partials in") with partial-
-failure states. The consumer group, reclaim, and aggregation math from Phases 1-2
-already do most of the groundwork.
+With the run lifecycle, distribution, crash recovery, and sharding all in place,
+the next phase surfaces what is happening WHILE a run executes: streaming
+progress and per-run metrics (requests/sec, error rate, latency over time) rather
+than only a final aggregate. Later phases add richer runner features (percentiles,
+bodies, non-GET, think-time -- Phase 5), a heartbeat/lease to remove the reclaim
+double-execution caveat (Phase 6), dashboards (Phase 7), auth/quotas (Phase 8),
+and Kubernetes (Phase 9).
 ```
 

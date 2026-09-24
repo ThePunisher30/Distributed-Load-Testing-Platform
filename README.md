@@ -5,9 +5,10 @@ build a tool that sends HTTP requests, but to understand the system design behin
 distributed workers, orchestration, message queues, metrics, failure handling,
 and observability — by building each piece from scratch.
 
-The platform grows in phases. **Phases 1 and 2 are complete**: a full test-run
+The platform grows in phases. **Phases 1, 2, and 3 are complete**: a full test-run
 lifecycle, distributed through a Redis Streams message broker, with worker crash
-recovery and dead-lettering.
+recovery and dead-lettering, run across multiple worker replicas — including
+splitting a single run into shards that execute in parallel and are re-aggregated.
 
 ```text
 create test run -> backend publishes a job -> worker consumes it ->
@@ -49,6 +50,13 @@ it via a consumer group, runs the load, and acknowledges it. If a worker dies
 mid-job, another reclaims the message after a visibility timeout; a job that keeps
 failing is moved to a dead-letter stream.
 
+A run can also be split into **shards** (`"shards": N` on create): the backend
+fans the virtual users out across N jobs that run in parallel on different
+workers, then re-aggregates the per-shard results (a weighted average over each
+shard's sample count) once the last shard finishes. `shards` defaults to 1, the
+single-worker path. If a worker dies mid-shard, another replica reclaims just that
+shard and the run still aggregates exactly.
+
 ## Running it
 
 Everything runs in Docker Compose:
@@ -69,6 +77,14 @@ Create a test run (from the host):
 curl -X POST http://localhost:8080/test-runs \
   -H "Content-Type: application/json" \
   -d '{"name":"demo","targetUrl":"http://target:8081/fast","method":"GET","virtualUsers":10,"durationSeconds":5}'
+```
+
+Split one run across workers with `shards` (here 40 VUs as 4 × 10):
+
+```bash
+curl -X POST http://localhost:8080/test-runs \
+  -H "Content-Type: application/json" \
+  -d '{"name":"sharded","targetUrl":"http://target:8081/fast","method":"GET","virtualUsers":40,"durationSeconds":5,"shards":4}'
 ```
 
 Read it back (use the id from the create response):
@@ -117,7 +133,6 @@ Current:
 
 Planned for later phases:
 
-- Splitting a single run across workers — 1,000 VUs as 250×4 (Phase 3, Level 1)
 - Prometheus + Grafana or a custom dashboard for live metrics (Phases 4 / 7)
 - Richer runner: percentiles, request bodies, more HTTP methods, think time (Phase 5)
 - Authentication, quotas, and target allowlists (Phase 8)
