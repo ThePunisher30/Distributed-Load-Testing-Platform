@@ -27,6 +27,7 @@ var allowedMethods = map[string]bool{
 const (
 	maxVirtualUsers    = 1000
 	maxDurationSeconds = 3600 // 1 hour
+	maxShards          = 64
 )
 
 // CreateTestRun handles POST /test-runs. It decodes and validates the request,
@@ -48,21 +49,38 @@ func (h *Handler) CreateTestRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tr, err := h.TestRuns.Create(r.Context(), req)
+	// Fan the run out into shards (>= 1) and insert run + shards atomically.
+	shardVUs := splitVUs(req.VirtualUsers, req.Shards)
+	tr, shardIDs, err := h.TestRuns.CreateWithShards(r.Context(), req, shardVUs)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not create test run")
 		return
 	}
 
-	// Publish the job so a worker picks it up immediately. The queued row already
-	// exists in Postgres; if publishing fails, the run is created but won't be
-	// delivered until we add a fallback (the dual-write gap Phase 2 will address
-	// with an outbox). Log it rather than failing the request.
-	if err := h.Publisher.PublishJob(r.Context(), tr.ID); err != nil {
-		log.Printf("run %d created but failed to publish job: %v", tr.ID, err)
+	// Publish one job per shard; the consumer group spreads them across workers.
+	// The shard rows already exist in Postgres; a failed publish is logged rather
+	// than failing the request (the dual-write gap, to be closed with an outbox).
+	for i, sid := range shardIDs {
+		if err := h.Publisher.PublishShard(r.Context(), sid); err != nil {
+			log.Printf("run %d shard %d created but failed to publish: %v", tr.ID, i, err)
+		}
 	}
 
 	writeJSON(w, http.StatusCreated, tr)
+}
+
+// splitVUs divides total virtual users across n shards as evenly as possible;
+// the first (total mod n) shards get one extra. Callers guarantee 1 <= n <= total.
+func splitVUs(total, n int) []int {
+	base, rem := total/n, total%n
+	out := make([]int, n)
+	for i := range out {
+		out[i] = base
+		if i < rem {
+			out[i]++
+		}
+	}
+	return out
 }
 
 // validateCreate checks the request and normalizes it in place. It returns an
@@ -96,6 +114,19 @@ func validateCreate(req *models.CreateTestRunRequest) string {
 	req.Method = strings.ToUpper(req.Method)
 	if !allowedMethods[req.Method] {
 		return "method must be one of GET, POST, PUT, PATCH, DELETE, HEAD"
+	}
+
+	// Default and validate the shard count (how many workers the run splits over).
+	if req.Shards == 0 {
+		req.Shards = 1
+	}
+	switch {
+	case req.Shards < 1:
+		return "shards must be at least 1"
+	case req.Shards > maxShards:
+		return "shards exceeds the maximum of " + strconv.Itoa(maxShards)
+	case req.Shards > req.VirtualUsers:
+		return "shards cannot exceed virtualUsers (each shard needs at least one VU)"
 	}
 
 	return ""

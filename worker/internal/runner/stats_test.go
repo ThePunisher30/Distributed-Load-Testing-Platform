@@ -20,6 +20,7 @@ func TestMergeStats_Mix(t *testing.T) {
 		TotalRequests:      5,
 		SuccessfulRequests: 3,
 		FailedRequests:     2,
+		LatencyCount:       4,     // 4 responses (10,20,5,30); the transport error has none
 		AvgLatencyMs:       16.25, // (10+20+5+30) / 4
 		MinLatencyMs:       5,
 		MaxLatencyMs:       30,
@@ -47,6 +48,7 @@ func TestMergeStats_ZeroSampleVU(t *testing.T) {
 		TotalRequests:      3,
 		SuccessfulRequests: 1,
 		FailedRequests:     2,
+		LatencyCount:       1, // only vu1's single sample
 		AvgLatencyMs:       5,
 		MinLatencyMs:       5, // NOT 0 — vu2 contributed no samples
 		MaxLatencyMs:       5,

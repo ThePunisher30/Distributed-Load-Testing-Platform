@@ -52,3 +52,16 @@ func (p *Publisher) PublishJob(ctx context.Context, runID int64) error {
 	}
 	return nil
 }
+
+// PublishShard appends a job carrying a shard id to the stream. A run is fanned
+// out into one message per shard; workers consume them and run each slice.
+func (p *Publisher) PublishShard(ctx context.Context, shardID int64) error {
+	err := p.rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: StreamKey,
+		Values: map[string]any{"shard_id": strconv.FormatInt(shardID, 10)},
+	}).Err()
+	if err != nil {
+		return fmt.Errorf("publish shard %d: %w", shardID, err)
+	}
+	return nil
+}

@@ -52,6 +52,31 @@ type CompleteRequest struct {
 	ErrorMessage       *string  `json:"errorMessage,omitempty"`
 }
 
+// ShardAssignment is what the backend returns when the worker starts/takes over a
+// shard: the slice of load this worker should run.
+type ShardAssignment struct {
+	ShardID         int64  `json:"shardId"`
+	RunID           int64  `json:"runId"`
+	ShardIndex      int    `json:"shardIndex"`
+	TargetURL       string `json:"targetUrl"`
+	Method          string `json:"method"`
+	VirtualUsers    int    `json:"virtualUsers"`
+	DurationSeconds int    `json:"durationSeconds"`
+}
+
+// CompleteShardRequest is the partial result the worker reports for one shard.
+type CompleteShardRequest struct {
+	Status             string   `json:"status"`
+	TotalRequests      *int64   `json:"totalRequests,omitempty"`
+	SuccessfulRequests *int64   `json:"successfulRequests,omitempty"`
+	FailedRequests     *int64   `json:"failedRequests,omitempty"`
+	LatencyCount       *int64   `json:"latencyCount,omitempty"`
+	AvgLatencyMs       *float64 `json:"avgLatencyMs,omitempty"`
+	MinLatencyMs       *float64 `json:"minLatencyMs,omitempty"`
+	MaxLatencyMs       *float64 `json:"maxLatencyMs,omitempty"`
+	ErrorMessage       *string  `json:"errorMessage,omitempty"`
+}
+
 // ClaimNext asks the backend for the next queued run. The bool return is
 // "claimed": false with a nil run means the queue is empty (HTTP 204), which is
 // a normal idle state, not an error.
@@ -192,6 +217,77 @@ func (c *Client) Complete(ctx context.Context, id int64, body CompleteRequest) e
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("complete returned status %s: %s", resp.Status, readBody(resp.Body))
+	}
+	return nil
+}
+
+// claimShard is the shared POST-and-decode for start/takeover. started=false
+// means the shard was not claimable (already done / gone) -> ack and skip.
+func (c *Client) claimShard(ctx context.Context, path string, shardID int64) (*ShardAssignment, bool, error) {
+	url := c.baseURL + "/internal/shards/" + strconv.FormatInt(shardID, 10) + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, false, fmt.Errorf("shard %s request failed: %w", path, err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var a ShardAssignment
+		if err := json.NewDecoder(resp.Body).Decode(&a); err != nil {
+			return nil, false, fmt.Errorf("decode shard assignment: %w", err)
+		}
+		return &a, true, nil
+	case http.StatusConflict, http.StatusNotFound:
+		return nil, false, nil
+	default:
+		return nil, false, fmt.Errorf("shard %s returned %s: %s", path, resp.Status, readBody(resp.Body))
+	}
+}
+
+// StartShard claims a queued shard (normal delivery).
+func (c *Client) StartShard(ctx context.Context, shardID int64) (*ShardAssignment, bool, error) {
+	return c.claimShard(ctx, "/start", shardID)
+}
+
+// TakeOverShard claims a reclaimed shard, taking over one that may be running.
+func (c *Client) TakeOverShard(ctx context.Context, shardID int64) (*ShardAssignment, bool, error) {
+	return c.claimShard(ctx, "/takeover", shardID)
+}
+
+// CompleteShard reports a shard's partial result.
+func (c *Client) CompleteShard(ctx context.Context, shardID int64, body CompleteShardRequest) error {
+	return c.postJSON(ctx, "/internal/shards/"+strconv.FormatInt(shardID, 10)+"/complete", body)
+}
+
+// FailShard marks a shard failed (dead-letter path).
+func (c *Client) FailShard(ctx context.Context, shardID int64, reason string) error {
+	return c.postJSON(ctx, "/internal/shards/"+strconv.FormatInt(shardID, 10)+"/fail",
+		map[string]string{"errorMessage": reason})
+}
+
+// postJSON POSTs body as JSON and treats any non-200 as an error.
+func (c *Client) postJSON(ctx context.Context, path string, body any) error {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("%s request failed: %w", path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s returned %s: %s", path, resp.Status, readBody(resp.Body))
 	}
 	return nil
 }

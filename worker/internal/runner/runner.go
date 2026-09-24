@@ -28,9 +28,14 @@ type Result struct {
 	TotalRequests      int64
 	SuccessfulRequests int64
 	FailedRequests     int64
-	AvgLatencyMs       float64
-	MinLatencyMs       float64
-	MaxLatencyMs       float64
+	// LatencyCount is how many requests produced a latency sample. It is carried
+	// alongside AvgLatencyMs so partial results from multiple shards can be
+	// combined into a correct weighted average (avg*count summed / count summed),
+	// not an average of averages.
+	LatencyCount int64
+	AvgLatencyMs float64
+	MinLatencyMs float64
+	MaxLatencyMs float64
 }
 
 // Run executes the load test described by cfg and returns aggregated metrics.

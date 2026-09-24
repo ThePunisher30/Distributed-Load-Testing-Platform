@@ -157,6 +157,122 @@ func (h *Handler) CompleteTestRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, tr)
 }
 
+// ---- Phase 3 Level 1: shard endpoints (a run is split into shards) ----
+
+// StartShard handles POST /internal/shards/{id}/start. Claims a queued shard and
+// returns everything the worker needs to run it. A duplicate delivery of an
+// already-started shard gets 409.
+func (h *Handler) StartShard(w http.ResponseWriter, r *http.Request) {
+	id, ok := shardID(w, r)
+	if !ok {
+		return
+	}
+	a, err := h.TestRuns.StartShard(r.Context(), id)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "shard not found")
+	case errors.Is(err, store.ErrNotQueued):
+		writeError(w, http.StatusConflict, "shard is not queued")
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "could not start shard")
+	default:
+		writeJSON(w, http.StatusOK, a)
+	}
+}
+
+// TakeoverShard handles POST /internal/shards/{id}/takeover. Reclaim path: takes
+// over a shard that may already be running (its worker is presumed dead).
+func (h *Handler) TakeoverShard(w http.ResponseWriter, r *http.Request) {
+	id, ok := shardID(w, r)
+	if !ok {
+		return
+	}
+	a, err := h.TestRuns.TakeOverShard(r.Context(), id)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "shard not found")
+	case errors.Is(err, store.ErrAlreadyDone):
+		writeError(w, http.StatusConflict, "shard is already completed or failed")
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "could not take over shard")
+	default:
+		writeJSON(w, http.StatusOK, a)
+	}
+}
+
+// CompleteShard handles POST /internal/shards/{id}/complete. Records a shard's
+// partial result; the store aggregates the run when its last shard finishes.
+func (h *Handler) CompleteShard(w http.ResponseWriter, r *http.Request) {
+	id, ok := shardID(w, r)
+	if !ok {
+		return
+	}
+	var req models.CompleteShardRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if req.Status != models.StatusCompleted && req.Status != models.StatusFailed {
+		writeError(w, http.StatusBadRequest, `status must be "completed" or "failed"`)
+		return
+	}
+
+	err := h.TestRuns.CompleteShard(r.Context(), id, req)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "shard not found")
+	case errors.Is(err, store.ErrNotRunning):
+		writeError(w, http.StatusConflict, "shard is not running")
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "could not complete shard")
+	default:
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	}
+}
+
+// FailShard handles POST /internal/shards/{id}/fail. Dead-letter path: mark a
+// shard failed with a reason regardless of its current state.
+func (h *Handler) FailShard(w http.ResponseWriter, r *http.Request) {
+	id, ok := shardID(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		ErrorMessage string `json:"errorMessage"`
+	}
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if req.ErrorMessage == "" {
+		req.ErrorMessage = "shard failed"
+	}
+
+	err := h.TestRuns.FailShard(r.Context(), id, req.ErrorMessage)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "shard not found")
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "could not fail shard")
+	default:
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	}
+}
+
+// shardID parses and validates the {id} path value shared by the shard handlers.
+func shardID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, http.StatusBadRequest, "id must be a positive integer")
+		return 0, false
+	}
+	return id, true
+}
+
 // validateComplete checks a completion request. A "completed" run must carry its
 // request counts; a "failed" run must explain why.
 func validateComplete(req *models.CompleteTestRunRequest) string {

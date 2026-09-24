@@ -24,6 +24,7 @@ type TestRun struct {
 	Method          string `json:"method"`
 	VirtualUsers    int    `json:"virtualUsers"`
 	DurationSeconds int    `json:"durationSeconds"`
+	ShardCount      int    `json:"shardCount"`
 	Status          string `json:"status"`
 
 	// Results (nil until the run completes).
@@ -50,6 +51,36 @@ type CreateTestRunRequest struct {
 	Method          string `json:"method"`
 	VirtualUsers    int    `json:"virtualUsers"`
 	DurationSeconds int    `json:"durationSeconds"`
+	// Shards is how many workers the run is split across (default 1 = unsplit).
+	// The virtual users are divided as evenly as possible across the shards.
+	Shards int `json:"shards"`
+}
+
+// ShardAssignment is what the backend returns when a worker starts (or takes
+// over) a shard: everything the worker needs to run that slice of the load.
+type ShardAssignment struct {
+	ShardID         int64  `json:"shardId"`
+	RunID           int64  `json:"runId"`
+	ShardIndex      int    `json:"shardIndex"`
+	TargetURL       string `json:"targetUrl"`
+	Method          string `json:"method"`
+	VirtualUsers    int    `json:"virtualUsers"`
+	DurationSeconds int    `json:"durationSeconds"`
+}
+
+// CompleteShardRequest is the partial result a worker reports for one shard.
+// LatencyCount travels with AvgLatencyMs so the backend can compute a correct
+// weighted average across shards.
+type CompleteShardRequest struct {
+	Status             string   `json:"status"`
+	TotalRequests      *int64   `json:"totalRequests"`
+	SuccessfulRequests *int64   `json:"successfulRequests"`
+	FailedRequests     *int64   `json:"failedRequests"`
+	LatencyCount       *int64   `json:"latencyCount"`
+	AvgLatencyMs       *float64 `json:"avgLatencyMs"`
+	MinLatencyMs       *float64 `json:"minLatencyMs"`
+	MaxLatencyMs       *float64 `json:"maxLatencyMs"`
+	ErrorMessage       *string  `json:"errorMessage"`
 }
 
 // CompleteTestRunRequest is the JSON body a worker sends to report the outcome

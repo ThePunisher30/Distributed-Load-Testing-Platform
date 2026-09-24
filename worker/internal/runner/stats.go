@@ -72,6 +72,7 @@ func mergeStats(all []vuStats) Result {
 		TotalRequests:      total,
 		SuccessfulRequests: successful,
 		FailedRequests:     failed,
+		LatencyCount:       latencyCount,
 		AvgLatencyMs:       avg,
 		MinLatencyMs:       minMs,
 		MaxLatencyMs:       maxMs,

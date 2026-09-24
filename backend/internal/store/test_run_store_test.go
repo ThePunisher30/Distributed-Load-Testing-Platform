@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS test_runs (
     duration_seconds INTEGER     NOT NULL CHECK (duration_seconds > 0),
     status           TEXT        NOT NULL DEFAULT 'queued'
                      CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+    shard_count      INTEGER     NOT NULL DEFAULT 1,
     total_requests      BIGINT,
     successful_requests BIGINT,
     failed_requests     BIGINT,
@@ -45,6 +46,26 @@ CREATE TABLE IF NOT EXISTS test_runs (
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     started_at       TIMESTAMPTZ,
     completed_at     TIMESTAMPTZ
+);
+CREATE TABLE IF NOT EXISTS test_run_shards (
+    id             BIGSERIAL PRIMARY KEY,
+    run_id         BIGINT  NOT NULL REFERENCES test_runs(id) ON DELETE CASCADE,
+    shard_index    INT     NOT NULL,
+    virtual_users  INT     NOT NULL CHECK (virtual_users > 0),
+    status         TEXT    NOT NULL DEFAULT 'queued'
+                   CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+    error_message  TEXT,
+    total_requests      BIGINT,
+    successful_requests BIGINT,
+    failed_requests     BIGINT,
+    latency_count       BIGINT,
+    avg_latency_ms      DOUBLE PRECISION,
+    min_latency_ms      DOUBLE PRECISION,
+    max_latency_ms      DOUBLE PRECISION,
+    started_at     TIMESTAMPTZ,
+    completed_at   TIMESTAMPTZ,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (run_id, shard_index)
 );`
 
 // newTestStore opens the test database, ensures the schema, and truncates the
@@ -72,7 +93,7 @@ func newTestStore(t *testing.T) *TestRunStore {
 	if _, err := db.ExecContext(ctx, schemaDDL); err != nil {
 		t.Fatalf("ensure schema: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, "TRUNCATE test_runs RESTART IDENTITY"); err != nil {
+	if _, err := db.ExecContext(ctx, "TRUNCATE test_run_shards, test_runs RESTART IDENTITY CASCADE"); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 
@@ -261,6 +282,121 @@ func TestStore_Fail(t *testing.T) {
 	// A missing run is ErrNotFound.
 	if _, err := s.Fail(ctx, 999999, "x"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("Fail(missing) error = %v, want ErrNotFound", err)
+	}
+}
+
+func shardPartial(total, success, failed, latCount int64, avg, minv, maxv float64) models.CompleteShardRequest {
+	return models.CompleteShardRequest{
+		Status:        models.StatusCompleted,
+		TotalRequests: ptr(total), SuccessfulRequests: ptr(success), FailedRequests: ptr(failed),
+		LatencyCount: ptr(latCount), AvgLatencyMs: ptr(avg), MinLatencyMs: ptr(minv), MaxLatencyMs: ptr(maxv),
+	}
+}
+
+func wantI64(t *testing.T, name string, got *int64, want int64) {
+	t.Helper()
+	if got == nil || *got != want {
+		t.Errorf("%s = %v, want %d", name, got, want)
+	}
+}
+
+func wantF64(t *testing.T, name string, got *float64, want float64) {
+	t.Helper()
+	if got == nil || *got != want {
+		t.Errorf("%s = %v, want %v", name, got, want)
+	}
+}
+
+// TestStore_Shards covers the fan-out + the completion barrier + weighted
+// aggregation: a run stays running until its LAST shard finishes, then the
+// partials combine into the run's result.
+func TestStore_Shards(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	run, ids, err := s.CreateWithShards(ctx, sampleCreate("split"), []int{12, 8})
+	if err != nil {
+		t.Fatalf("CreateWithShards: %v", err)
+	}
+	if run.ShardCount != 2 || len(ids) != 2 || run.Status != models.StatusQueued {
+		t.Fatalf("unexpected run: shardCount=%d ids=%d status=%q", run.ShardCount, len(ids), run.Status)
+	}
+
+	// Start shard 0; a duplicate start is rejected.
+	if _, err := s.StartShard(ctx, ids[0]); err != nil {
+		t.Fatalf("StartShard 0: %v", err)
+	}
+	if _, err := s.StartShard(ctx, ids[0]); !errors.Is(err, ErrNotQueued) {
+		t.Errorf("duplicate StartShard error = %v, want ErrNotQueued", err)
+	}
+	// Complete shard 0 — run moves to running but must NOT complete yet.
+	if err := s.CompleteShard(ctx, ids[0], shardPartial(12, 10, 2, 10, 4, 1, 8)); err != nil {
+		t.Fatalf("CompleteShard 0: %v", err)
+	}
+	mid, _ := s.GetByID(ctx, run.ID)
+	if mid.Status != models.StatusRunning {
+		t.Errorf("after 1/2 shards status = %q, want running (barrier not reached)", mid.Status)
+	}
+	if mid.TotalRequests != nil {
+		t.Error("run results must stay empty until all shards finish")
+	}
+
+	// Complete shard 1 — barrier fires, run aggregates and completes.
+	if _, err := s.StartShard(ctx, ids[1]); err != nil {
+		t.Fatalf("StartShard 1: %v", err)
+	}
+	if err := s.CompleteShard(ctx, ids[1], shardPartial(8, 8, 0, 10, 6, 2, 9)); err != nil {
+		t.Fatalf("CompleteShard 1: %v", err)
+	}
+
+	done, _ := s.GetByID(ctx, run.ID)
+	if done.Status != models.StatusCompleted {
+		t.Fatalf("after all shards status = %q, want completed", done.Status)
+	}
+	wantI64(t, "total", done.TotalRequests, 20)        // 12 + 8
+	wantI64(t, "success", done.SuccessfulRequests, 18) // 10 + 8
+	wantI64(t, "failed", done.FailedRequests, 2)       // 2 + 0
+	wantF64(t, "avg", done.AvgLatencyMs, 5.0)          // (4*10 + 6*10) / 20 — weighted
+	wantF64(t, "min", done.MinLatencyMs, 1)            // min(1, 2)
+	wantF64(t, "max", done.MaxLatencyMs, 9)            // max(8, 9)
+	if done.CompletedAt == nil {
+		t.Error("completedAt should be set")
+	}
+}
+
+// TestStore_ShardFailAndTakeover: a failed shard fails the run (via the barrier),
+// and a running shard can be taken over (reclaim).
+func TestStore_ShardFailAndTakeover(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	run, ids, _ := s.CreateWithShards(ctx, sampleCreate("failsplit"), []int{5, 5})
+	if _, err := s.StartShard(ctx, ids[0]); err != nil {
+		t.Fatalf("StartShard: %v", err)
+	}
+	if err := s.CompleteShard(ctx, ids[0], shardPartial(5, 5, 0, 5, 3, 1, 5)); err != nil {
+		t.Fatalf("CompleteShard: %v", err)
+	}
+	// Fail shard 1 (dead-letter) -> barrier -> run failed, but keeps aggregated numbers.
+	if err := s.FailShard(ctx, ids[1], "boom"); err != nil {
+		t.Fatalf("FailShard: %v", err)
+	}
+	done, _ := s.GetByID(ctx, run.ID)
+	if done.Status != models.StatusFailed {
+		t.Errorf("run status = %q, want failed (a shard failed)", done.Status)
+	}
+	if done.ErrorMessage == nil {
+		t.Error("failed run should carry an error message")
+	}
+	wantI64(t, "total", done.TotalRequests, 5) // the one completed shard
+
+	// A running shard can be taken over (reclaim path).
+	_, ids2, _ := s.CreateWithShards(ctx, sampleCreate("takeover"), []int{3})
+	if _, err := s.StartShard(ctx, ids2[0]); err != nil {
+		t.Fatalf("StartShard: %v", err)
+	}
+	if a, err := s.TakeOverShard(ctx, ids2[0]); err != nil || a.VirtualUsers != 3 {
+		t.Errorf("TakeOverShard(running) = (%+v, %v), want ok with 3 VUs", a, err)
 	}
 }
 

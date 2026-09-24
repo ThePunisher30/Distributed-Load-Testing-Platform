@@ -48,6 +48,12 @@ func (h *Handler) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /internal/test-runs/{id}/fail", h.FailTestRun)
 	mux.HandleFunc("POST /internal/test-runs/{id}/complete", h.CompleteTestRun)
 
+	// Phase 3 Level 1: a run is split into shards; workers drive shards.
+	mux.HandleFunc("POST /internal/shards/{id}/start", h.StartShard)
+	mux.HandleFunc("POST /internal/shards/{id}/takeover", h.TakeoverShard)
+	mux.HandleFunc("POST /internal/shards/{id}/complete", h.CompleteShard)
+	mux.HandleFunc("POST /internal/shards/{id}/fail", h.FailShard)
+
 	return mux
 }
 

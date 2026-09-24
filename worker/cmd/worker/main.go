@@ -158,32 +158,32 @@ func reclaimStuck(ctx context.Context, c *client.Client, rdb *redis.Client, cons
 	}
 }
 
-// deadLetter sets aside a job that has been delivered too many times: it copies
-// the message to the dead-letter stream, marks the run failed, and acks the
-// original so it stops being redelivered.
+// deadLetter sets aside a shard job that has been delivered too many times: it
+// copies the message to the dead-letter stream, marks the shard failed (which
+// may in turn fail its run once all shards are terminal), and acks the original.
 func deadLetter(ctx context.Context, c *client.Client, rdb *redis.Client, msgID string, deliveries int64) {
-	var runID int64
+	var shardID int64
 	if msgs, err := rdb.XRange(ctx, streamKey, msgID, msgID).Result(); err == nil && len(msgs) == 1 {
-		if s, ok := msgs[0].Values["run_id"].(string); ok {
-			runID, _ = strconv.ParseInt(s, 10, 64)
+		if s, ok := msgs[0].Values["shard_id"].(string); ok {
+			shardID, _ = strconv.ParseInt(s, 10, 64)
 		}
 	}
-	log.Printf("dead-lettering message %s (run %d) after %d deliveries", msgID, runID, deliveries)
+	log.Printf("dead-lettering message %s (shard %d) after %d deliveries", msgID, shardID, deliveries)
 
 	// Keep a copy in the dead-letter stream for later inspection.
 	rdb.XAdd(ctx, &redis.XAddArgs{
 		Stream: deadStreamKey,
 		Values: map[string]any{
-			"run_id":     strconv.FormatInt(runID, 10),
+			"shard_id":   strconv.FormatInt(shardID, 10),
 			"orig_id":    msgID,
 			"deliveries": deliveries,
 		},
 	})
 
-	// Mark the run failed so it doesn't linger in a non-terminal state.
-	if runID > 0 {
-		if err := c.FailRun(ctx, runID, "dead-lettered after too many delivery attempts"); err != nil {
-			log.Printf("dead-letter: could not mark run %d failed: %v", runID, err)
+	// Mark the shard failed so it doesn't linger in a non-terminal state.
+	if shardID > 0 {
+		if err := c.FailShard(ctx, shardID, "dead-lettered after too many delivery attempts"); err != nil {
+			log.Printf("dead-letter: could not fail shard %d: %v", shardID, err)
 		}
 	}
 
@@ -196,47 +196,46 @@ func deadLetter(ctx context.Context, c *client.Client, rdb *redis.Client, msgID 
 // pending list so it is not redelivered. On a transient failure we deliberately
 // do NOT ack, so the message stays pending and can be retried/reclaimed later.
 func handleMessage(ctx context.Context, c *client.Client, rdb *redis.Client, msg redis.XMessage, reclaimed bool) {
-	idStr, _ := msg.Values["run_id"].(string)
+	idStr, _ := msg.Values["shard_id"].(string)
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		// A malformed message will never succeed; ack it so it stops coming back.
-		log.Printf("bad run_id %q in message %s; acking to discard", idStr, msg.ID)
+		log.Printf("bad shard_id %q in message %s; acking to discard", idStr, msg.ID)
 		ack(ctx, rdb, msg.ID)
 		return
 	}
 
-	// A reclaimed job may have been left mid-run, so it can take over a 'running'
-	// run; a normal delivery only starts a 'queued' run (rejecting duplicates).
-	var run *client.TestRun
+	// A reclaimed shard may have been left mid-run, so it can take over a running
+	// shard; a normal delivery only starts a queued shard (rejecting duplicates).
+	var a *client.ShardAssignment
 	var ok bool
 	if reclaimed {
-		run, ok, err = c.TakeOverRun(ctx, id)
+		a, ok, err = c.TakeOverShard(ctx, id)
 	} else {
-		run, ok, err = c.StartRun(ctx, id)
+		a, ok, err = c.StartShard(ctx, id)
 	}
 	if err != nil {
 		// Transient (backend unreachable, etc.): leave unacked so it is retried.
-		log.Printf("claim run %d failed: %v (leaving message pending for retry)", id, err)
+		log.Printf("claim shard %d failed: %v (leaving message pending for retry)", id, err)
 		return
 	}
 	if !ok {
 		// Already done (duplicate/finished) or gone: nothing to do. Ack and skip.
-		// Ack it — this is idempotency in action.
-		log.Printf("run %d not claimable (duplicate/finished/missing); acking", id)
+		log.Printf("shard %d not claimable (duplicate/finished/missing); acking", id)
 		ack(ctx, rdb, msg.ID)
 		return
 	}
 
-	log.Printf("claimed run %d (%q): %d VUs for %ds against %s",
-		run.ID, run.Name, run.VirtualUsers, run.DurationSeconds, run.TargetURL)
+	log.Printf("claimed run %d shard %d: %d VUs for %ds against %s",
+		a.RunID, a.ShardIndex, a.VirtualUsers, a.DurationSeconds, a.TargetURL)
 
-	result := executeRun(ctx, run)
-	if err := c.Complete(ctx, run.ID, result); err != nil {
+	result := executeShard(ctx, a)
+	if err := c.CompleteShard(ctx, a.ShardID, result); err != nil {
 		// Ran the load but couldn't report it: leave pending so completion retries.
-		log.Printf("failed to report completion for run %d: %v (leaving pending)", run.ID, err)
+		log.Printf("failed to report shard %d completion: %v (leaving pending)", id, err)
 		return
 	}
-	log.Printf("run %d reported as %s", run.ID, result.Status)
+	log.Printf("run %d shard %d reported as %s", a.RunID, a.ShardIndex, result.Status)
 
 	ack(ctx, rdb, msg.ID)
 }
@@ -247,33 +246,35 @@ func ack(ctx context.Context, rdb *redis.Client, msgID string) {
 	}
 }
 
-// executeRun runs the load test using the runner and maps its Result into the
-// completion payload the backend expects. A run that cannot start (bad config)
-// is reported as failed; a run that executed is reported as completed, even if
-// some individual requests failed.
-func executeRun(ctx context.Context, run *client.TestRun) client.CompleteRequest {
+// executeShard runs one shard's slice of the load and maps the runner Result
+// into the shard's partial-result payload. A shard that cannot start (bad config)
+// is reported failed; one that executed is reported completed, even if some of
+// its individual requests failed. LatencyCount travels along so the backend can
+// combine shard averages into a correct weighted run average.
+func executeShard(ctx context.Context, a *client.ShardAssignment) client.CompleteShardRequest {
 	cfg := runner.Config{
-		TargetURL:      run.TargetURL,
-		Method:         run.Method,
-		VirtualUsers:   run.VirtualUsers,
-		Duration:       time.Duration(run.DurationSeconds) * time.Second,
+		TargetURL:      a.TargetURL,
+		Method:         a.Method,
+		VirtualUsers:   a.VirtualUsers,
+		Duration:       time.Duration(a.DurationSeconds) * time.Second,
 		RequestTimeout: 5 * time.Second,
 	}
 
 	res, err := runner.Run(ctx, cfg)
 	if err != nil {
 		msg := err.Error()
-		return client.CompleteRequest{
+		return client.CompleteShardRequest{
 			Status:       "failed",
 			ErrorMessage: &msg,
 		}
 	}
 
-	return client.CompleteRequest{
+	return client.CompleteShardRequest{
 		Status:             "completed",
 		TotalRequests:      &res.TotalRequests,
 		SuccessfulRequests: &res.SuccessfulRequests,
 		FailedRequests:     &res.FailedRequests,
+		LatencyCount:       &res.LatencyCount,
 		AvgLatencyMs:       &res.AvgLatencyMs,
 		MinLatencyMs:       &res.MinLatencyMs,
 		MaxLatencyMs:       &res.MaxLatencyMs,
