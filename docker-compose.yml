@@ -65,6 +65,9 @@ services:
       RECLAIM_MIN_IDLE: 10s
       # Dead-letter a message after this many delivery attempts (low for the demo).
       MAX_DELIVERIES: 3
+    # Each replica serves /metrics on :9100 (internal). No host port is mapped
+    # because replicas share the service name; Prometheus scrapes them over the
+    # compose network via DNS discovery instead.
     depends_on:
       backend:
         condition: service_healthy
@@ -97,5 +100,42 @@ services:
       timeout: 3s
       retries: 5
 
+  # Phase 4: metrics + observability. Prometheus PULLS /metrics from the backend
+  # and every worker replica (via DNS discovery of the "worker" service) every few
+  # seconds and stores the readings as time series. Config in ./monitoring.
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: dltp-prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      # Exposed so you can browse Prometheus and run PromQL at http://localhost:9090.
+      - "9090:9090"
+    depends_on:
+      - backend
+
+  # Grafana reads Prometheus and draws the live dashboards. The Prometheus data
+  # source is auto-provisioned from ./monitoring/grafana/provisioning, and
+  # anonymous viewing is on so you can open dashboards without logging in.
+  grafana:
+    image: grafana/grafana:latest
+    container_name: dltp-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      # The dashboard UI at http://localhost:3000.
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
 volumes:
   postgres_data:
+  prometheus_data:
+  grafana_data:

@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"distributed-load-testing-platform/backend/internal/queue"
 	"distributed-load-testing-platform/backend/internal/store"
 )
@@ -34,6 +36,11 @@ func New(db *sql.DB, publisher *queue.Publisher) *Handler {
 func (h *Handler) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", h.Health)
+
+	// Phase 4: expose Prometheus metrics for scraping. promhttp.Handler() serves
+	// the default registry (Go runtime metrics now; our custom load metrics get
+	// registered there too once we add them).
+	mux.Handle("GET /metrics", promhttp.Handler())
 
 	// Public API (used by end users).
 	mux.HandleFunc("POST /test-runs", h.CreateTestRun)

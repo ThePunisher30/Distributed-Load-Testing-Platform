@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -15,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 
 	"distributed-load-testing-platform/worker/internal/client"
@@ -48,6 +50,16 @@ func main() {
 	defer stop()
 
 	c := client.New(backendURL)
+
+	// Phase 4: unlike the backend, the worker has no HTTP server of its own, so we
+	// run a small side server just to expose /metrics for Prometheus to scrape.
+	// It runs alongside the consume loop and is shut down when the context is done.
+	metricsSrv := startMetricsServer(getenv("METRICS_ADDR", ":9100"))
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = metricsSrv.Shutdown(shutdownCtx)
+	}()
 
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
 	defer rdb.Close()
@@ -279,6 +291,22 @@ func executeShard(ctx context.Context, a *client.ShardAssignment) client.Complet
 		MinLatencyMs:       &res.MinLatencyMs,
 		MaxLatencyMs:       &res.MaxLatencyMs,
 	}
+}
+
+// startMetricsServer launches a background HTTP server that serves Prometheus
+// metrics at /metrics on addr. Prometheus scrapes each worker replica here. The
+// returned server is shut down by the caller on exit.
+func startMetricsServer(addr string) *http.Server {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	srv := &http.Server{Addr: addr, Handler: mux}
+	go func() {
+		log.Printf("worker metrics on %s/metrics", addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("metrics server error: %v", err)
+		}
+	}()
+	return srv
 }
 
 // getenv returns the env var named key, or fallback if unset/empty.

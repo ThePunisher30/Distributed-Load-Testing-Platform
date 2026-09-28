@@ -1,0 +1,24 @@
+# Prometheus scrape configuration for the load testing platform.
+#
+# Prometheus PULLS metrics: every scrape_interval it fetches /metrics from each
+# target and stores the readings as time series. Services never push to it.
+
+global:
+  scrape_interval: 5s # how often to sample every target
+  scrape_timeout: 4s
+
+scrape_configs:
+  # The backend exposes /metrics on its main HTTP port (8080).
+  - job_name: backend
+    static_configs:
+      - targets: ["backend:8080"]
+
+  # Workers are scaled (docker compose up --scale worker=N), so there is no fixed
+  # list of hosts. Docker Compose's DNS resolves the service name "worker" to the
+  # IPs of ALL replicas, so a DNS service-discovery lookup finds every one of them
+  # and Prometheus scrapes each on its metrics port (9100).
+  - job_name: worker
+    dns_sd_configs:
+      - names: ["worker"]
+        type: A
+        port: 9100
