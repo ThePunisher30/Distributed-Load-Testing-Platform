@@ -7,6 +7,7 @@ package runner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"sync"
@@ -95,6 +96,7 @@ func doRequest(ctx context.Context, client *http.Client, cfg Config, s *vuStats)
 	req, err := http.NewRequestWithContext(reqCtx, cfg.Method, cfg.TargetURL, nil)
 	if err != nil {
 		s.record(0, false, false) // couldn't even build the request
+		requestsTotal.WithLabelValues("error", cfg.Method).Inc()
 		return
 	}
 
@@ -102,6 +104,7 @@ func doRequest(ctx context.Context, client *http.Client, cfg Config, s *vuStats)
 	resp, err := client.Do(req)
 	if err != nil {
 		s.record(0, false, false) // transport error: timeout, connection refused, etc.
+		requestsTotal.WithLabelValues("error", cfg.Method).Inc()
 		return
 	}
 
@@ -115,6 +118,13 @@ func doRequest(ctx context.Context, client *http.Client, cfg Config, s *vuStats)
 	elapsedMs := float64(time.Since(start).Nanoseconds()) / 1e6
 	success := resp.StatusCode < 400 // our agreed rule: >= 400 is a failure
 	s.record(elapsedMs, success, true)
+
+	// Live metrics: count this request by outcome class, and record its latency.
+	// statusClass comes from the leading digit (200 -> "2xx", 404 -> "4xx"). The
+	// histogram takes seconds, so we divide the millisecond measurement by 1000.
+	statusClass := fmt.Sprintf("%dxx", resp.StatusCode/100)
+	requestsTotal.WithLabelValues(statusClass, cfg.Method).Inc()
+	requestDuration.WithLabelValues(cfg.Method).Observe(elapsedMs / 1000)
 }
 
 // newHTTPClient builds ONE client shared by all virtual users. Go's default
