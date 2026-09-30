@@ -1,10 +1,12 @@
 # Auto-provision the Prometheus data source so Grafana is wired up on first boot
-# (no clicking through the UI). Grafana reads this at startup.
+# (no clicking through the UI). Grafana reads this at startup. The fixed uid lets
+# the provisioned dashboard reference this data source reliably.
 
 apiVersion: 1
 
 datasources:
   - name: Prometheus
+    uid: prometheus
     type: prometheus
     access: proxy
     url: http://prometheus:9090

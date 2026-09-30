@@ -1,0 +1,14 @@
+# Tell Grafana to load any dashboard JSON files it finds in the mounted folder,
+# so the load-test dashboard appears automatically on startup.
+
+apiVersion: 1
+
+providers:
+  - name: load-testing
+    orgId: 1
+    type: file
+    disableDeletion: false
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false
