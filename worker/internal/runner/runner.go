@@ -67,6 +67,8 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
+			activeVUs.Inc()       // this VU is now alive
+			defer activeVUs.Dec() // ...and counted down whenever the goroutine exits
 			runVirtualUser(runCtx, client, cfg, &stats[idx])
 		}(i)
 	}

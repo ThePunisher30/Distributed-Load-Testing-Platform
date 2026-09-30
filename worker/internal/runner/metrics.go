@@ -27,4 +27,11 @@ var (
 		},
 		[]string{"method"},
 	)
+
+	activeVUs = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "loadtest_active_vus", // ← your gauge name from Step 2
+			Help: "Virtual users currently running load on this worker.",
+		},
+	)
 )
