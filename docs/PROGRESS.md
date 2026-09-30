@@ -1005,19 +1005,89 @@ caveat: short jobs -> reclaim fires only on real deaths; long jobs (> the idle
 timeout) -> healthy shards also look idle and get double-run (correct but wasted)
 until the Phase 6 heartbeat/lease.
 
+## Phase 4: Metrics and Observability
+
+The platform now has LIVE visibility while a run executes, not just a final
+aggregate. The backend and every worker expose a Prometheus `/metrics` endpoint;
+Prometheus scrapes them and stores time series; Grafana draws live dashboards.
+
+New services (docker-compose): `prometheus` (scrapes backend:8080 and every
+worker replica, discovered by DNS on the "worker" service name at :9100) and
+`grafana` (Prometheus data source + the dashboard auto-provisioned from
+./monitoring). The worker had no HTTP server, so it now runs a small side server
+just for /metrics.
+
+The metrics (defined in worker/internal/runner/metrics.go, updated in the runner
+hot path):
+
+```text
+loadtest_requests_total          counter,   labels: status_class, method
+loadtest_request_duration_seconds histogram, label: method (le auto-added)
+loadtest_active_vus              gauge,     no labels (instance = which worker)
+```
+
+Design decisions (the learning of this phase):
+
+- Metric TYPE follows behavior: a monotonic count is a counter; a current level
+  that moves both ways is a gauge; a distribution you want percentiles from is a
+  histogram. Latency is a histogram, NOT a gauge -- a gauge holds one value and
+  can't yield p50/p95/p99; a histogram keeps bucket counts, so any percentile is
+  cheap (histogram_quantile).
+- LABEL CARDINALITY is the constraint: every distinct label-value combination is
+  its own stored series, so labels must be BOUNDED. status_class (2xx/4xx/5xx/
+  error) and method are bounded and kept. run_id, target_url, vu_id are unbounded
+  (over time / user-supplied) and were REJECTED -- they would explode the series
+  count, worst of all on a histogram (cost is multiplied by the bucket count).
+- Per-run detail stays in Postgres (test_runs already stores each run's result);
+  metrics are for live, aggregate, bounded-label trends. Errors are a status_class
+  SLICE of requests_total, not a separate metric.
+- Expose RAW cumulative counters and derive rates at query time (rate() in PromQL),
+  never pre-compute a rate in code. This also dissolves the consistent-snapshot
+  problem: individual metrics are atomic (safe to scrape mid-write), and because
+  nothing in the hot path combines two metrics, no coherent multi-value snapshot
+  is ever needed.
+
+Concurrency (the hot path): each request updates the shared Prometheus metrics
+(.Inc()/.Observe()) alongside the existing lock-free per-VU vuStats. Those calls
+run from every VU goroutine at once and are safe because the client increments
+ATOMICALLY under the hood -- the atomic option done for us, no lock. The
+active_vus gauge is incremented when each VU goroutine spawns and decremented via
+`defer` when it exits, so it is balanced no matter how the goroutine returns
+(rises to the VU count during a run, drains to 0 at the end).
+
+```text
+Verified live: a sharded run's loadtest_requests_total climbs per worker mid-run;
+Prometheus gives fleet RPS via sum(rate(...[30s])); the histogram _count equals the
+2xx count (observe fires only on a response); p95 comes from histogram_quantile;
+active_vus rises to the requested VU count across workers and drains to 0.
+Grafana "Load Testing Platform" dashboard shows RPS, RPS-by-class, error rate,
+p50/p95/p99 latency, and active VUs per worker, refreshing live.
+```
+
+Learning point:
+
+```text
+Instrumenting a hot path is a concurrency + trade-off problem, not a checkbox. Use
+atomic shared counters (the Prometheus client) so many goroutines can update one
+number safely; model each metric by behavior (counter/gauge/histogram); keep every
+label bounded or cardinality explodes; and expose raw facts, deriving rates and
+percentiles at query time so the query layer -- not your hot path -- does the math.
+```
+
 ## Current System State
 
 ```text
 Whole platform runs in Docker Compose: postgres + redis + backend + N worker
-replicas + target. Jobs are distributed via a Redis Streams consumer group (no
-polling), load-balanced across workers, with crash recovery (reclaim) and
-dead-lettering. A single run is fanned out into shards that run in parallel across
-workers and are re-aggregated on completion. End-to-end lifecycle runs on its own
+replicas + target + prometheus + grafana. Jobs are distributed via a Redis Streams
+consumer group (no polling), load-balanced across workers, with crash recovery
+(reclaim) and dead-lettering. A single run is fanned out into shards that run in
+parallel across workers and are re-aggregated on completion. Live metrics (RPS,
+error rate, latency percentiles, active VUs) are exposed to Prometheus and shown
+on a Grafana dashboard while runs execute. End-to-end lifecycle runs on its own
 with REAL load results.
 ```
 
-Phases 1, 2, and 3 are COMPLETE. Phase 3 covers both Level 0 (worker replicas for
-concurrent runs) and Level 1 (splitting one run across workers via shards).
+Phases 1, 2, 3, and 4 are COMPLETE.
 
 Known follow-ups (not blocking):
 
@@ -1026,20 +1096,20 @@ Known follow-ups (not blocking):
   (Phase 6); otherwise a long in-flight job can be reclaimed and run twice.
 - Dual-write gap: if the INSERT succeeds but XADD fails, the run is queued with
   no message and won't be delivered (add an outbox pattern later).
-- Percentiles (p50/p95/p99), headers/body, non-GET methods, think-time (Phase 5).
+- Richer runner: headers/body, non-GET methods, per-second buckets, think-time,
+  scenarios, assertions (Phase 5). Latency percentiles now exist via the histogram.
 ```
 
 ## Next Step
 
-Phase 4: live metrics / observability.
+Phase 5: better runner capabilities.
 
 ```text
-With the run lifecycle, distribution, crash recovery, and sharding all in place,
-the next phase surfaces what is happening WHILE a run executes: streaming
-progress and per-run metrics (requests/sec, error rate, latency over time) rather
-than only a final aggregate. Later phases add richer runner features (percentiles,
-bodies, non-GET, think-time -- Phase 5), a heartbeat/lease to remove the reclaim
-double-execution caveat (Phase 6), dashboards (Phase 7), auth/quotas (Phase 8),
-and Kubernetes (Phase 9).
+Evolve the runner from a basic GET engine into a more realistic one: HTTP methods
+beyond GET, headers and request bodies, status-code breakdown, per-second RPS
+buckets, multi-step scenarios, think time, and basic assertions/checks. Later
+phases add a heartbeat/lease to remove the reclaim double-execution caveat
+(Phase 6), a React dashboard (Phase 7), auth/quotas (Phase 8), and Kubernetes
+(Phase 9).
 ```
 

@@ -5,10 +5,12 @@ build a tool that sends HTTP requests, but to understand the system design behin
 distributed workers, orchestration, message queues, metrics, failure handling,
 and observability — by building each piece from scratch.
 
-The platform grows in phases. **Phases 1, 2, and 3 are complete**: a full test-run
+The platform grows in phases. **Phases 1–4 are complete**: a full test-run
 lifecycle, distributed through a Redis Streams message broker, with worker crash
 recovery and dead-lettering, run across multiple worker replicas — including
-splitting a single run into shards that execute in parallel and are re-aggregated.
+splitting a single run into shards that execute in parallel and are re-aggregated
+— with live Prometheus metrics and a Grafana dashboard showing what happens as a
+run executes.
 
 ```text
 create test run -> backend publishes a job -> worker consumes it ->
@@ -26,6 +28,8 @@ Worker          consumes jobs and executes them with a custom load runner
 Target Service  safe local app to send load at (/fast, /slow, /error, /random)
 PostgreSQL      source of truth for test-run config and results
 Redis           message broker (Streams) that distributes jobs to workers
+Prometheus      scrapes /metrics from backend + workers, stores time series
+Grafana         live dashboard (RPS, error rate, latency percentiles, active VUs)
 ```
 
 The load runner is written from scratch (no k6, JMeter, Locust, or Gatling) on
@@ -107,6 +111,28 @@ Example result:
 }
 ```
 
+## Live metrics
+
+While runs execute, the backend and every worker expose Prometheus metrics, and a
+Grafana dashboard shows them live:
+
+```text
+Grafana      http://localhost:3000   (anonymous viewing on; "Load Testing Platform")
+Prometheus   http://localhost:9090   (targets, and a PromQL query box)
+```
+
+Metrics the runner emits (bounded labels only; per-run detail stays in Postgres):
+
+```text
+loadtest_requests_total            counter    labels: status_class, method
+loadtest_request_duration_seconds  histogram  label: method   (p50/p95/p99)
+loadtest_active_vus                gauge      current live virtual users per worker
+```
+
+Rates and percentiles are derived at query time in PromQL, e.g. fleet RPS is
+`sum(rate(loadtest_requests_total[30s]))` and p95 latency is
+`histogram_quantile(0.95, sum by (le) (rate(loadtest_request_duration_seconds_bucket[1m])))`.
+
 ## Tests
 
 ```bash
@@ -129,12 +155,14 @@ Current:
 - Go — backend, worker, target service, and the custom runner
 - PostgreSQL — persistent storage and source of truth
 - Redis Streams — job-distribution message broker (consumer groups, reclaim, dead-letter)
+- Prometheus + Grafana — pull-based metrics and live dashboards
 - Docker Compose — local infrastructure, one-command startup; scale workers with `--scale worker=N` (they share the consumer group)
 
 Planned for later phases:
 
-- Prometheus + Grafana or a custom dashboard for live metrics (Phases 4 / 7)
-- Richer runner: percentiles, request bodies, more HTTP methods, think time (Phase 5)
+- Richer runner: request bodies, more HTTP methods, per-second buckets, think time (Phase 5)
+- Heartbeat/lease to remove the reclaim double-execution caveat (Phase 6)
+- A React dashboard for creating and viewing runs (Phase 7)
 - Authentication, quotas, and target allowlists (Phase 8)
 - Local Kubernetes with kind or minikube (Phase 9)
 
