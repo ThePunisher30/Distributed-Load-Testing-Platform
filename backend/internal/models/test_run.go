@@ -54,18 +54,24 @@ type CreateTestRunRequest struct {
 	// Shards is how many workers the run is split across (default 1 = unsplit).
 	// The virtual users are divided as evenly as possible across the shards.
 	Shards int `json:"shards"`
+	// Phase 5: optional request shape. Headers are sent on every request; Body is
+	// the raw request payload (for POST/PUT/PATCH). Both default to empty.
+	Headers map[string]string `json:"headers,omitempty"`
+	Body    string            `json:"body,omitempty"`
 }
 
 // ShardAssignment is what the backend returns when a worker starts (or takes
 // over) a shard: everything the worker needs to run that slice of the load.
 type ShardAssignment struct {
-	ShardID         int64  `json:"shardId"`
-	RunID           int64  `json:"runId"`
-	ShardIndex      int    `json:"shardIndex"`
-	TargetURL       string `json:"targetUrl"`
-	Method          string `json:"method"`
-	VirtualUsers    int    `json:"virtualUsers"`
-	DurationSeconds int    `json:"durationSeconds"`
+	ShardID         int64             `json:"shardId"`
+	RunID           int64             `json:"runId"`
+	ShardIndex      int               `json:"shardIndex"`
+	TargetURL       string            `json:"targetUrl"`
+	Method          string            `json:"method"`
+	VirtualUsers    int               `json:"virtualUsers"`
+	DurationSeconds int               `json:"durationSeconds"`
+	Headers         map[string]string `json:"headers,omitempty"`
+	Body            string            `json:"body,omitempty"`
 }
 
 // CompleteShardRequest is the partial result a worker reports for one shard.

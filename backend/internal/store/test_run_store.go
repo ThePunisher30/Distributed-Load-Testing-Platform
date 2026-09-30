@@ -5,6 +5,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -99,11 +100,26 @@ func (s *TestRunStore) CreateWithShards(ctx context.Context, req models.CreateTe
 	}
 	defer tx.Rollback() // no-op once Commit has succeeded
 
+	// Headers and body are optional. We pass them as `any` so an unset one goes in
+	// as SQL NULL. Headers travel as a JSON string cast to jsonb in the query
+	// ($7::jsonb); the explicit cast keeps it robust across the database/sql driver.
+	var headers, body any
+	if len(req.Headers) > 0 {
+		j, err := json.Marshal(req.Headers)
+		if err != nil {
+			return nil, nil, fmt.Errorf("marshal headers: %w", err)
+		}
+		headers = string(j)
+	}
+	if req.Body != "" {
+		body = req.Body
+	}
+
 	run, err := scanRow(tx.QueryRowContext(ctx, `
-		INSERT INTO test_runs (name, target_url, method, virtual_users, duration_seconds, shard_count)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO test_runs (name, target_url, method, virtual_users, duration_seconds, shard_count, headers, body)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
 		RETURNING `+testRunColumns,
-		req.Name, req.TargetURL, req.Method, req.VirtualUsers, req.DurationSeconds, len(shardVUs)))
+		req.Name, req.TargetURL, req.Method, req.VirtualUsers, req.DurationSeconds, len(shardVUs), headers, body))
 	if err != nil {
 		return nil, nil, fmt.Errorf("insert run: %w", err)
 	}
@@ -326,20 +342,28 @@ func (s *TestRunStore) startShard(ctx context.Context, shardID int64, allowRunni
 		guard = "sh.status IN ('queued', 'running')"
 	}
 	a := models.ShardAssignment{ShardID: shardID}
+	var headersJSON []byte
+	var body sql.NullString
 	err := s.db.QueryRowContext(ctx, `
 		UPDATE test_run_shards sh
 		SET status = 'running', started_at = now()
 		FROM test_runs r
 		WHERE sh.id = $1 AND r.id = sh.run_id AND `+guard+`
-		RETURNING sh.run_id, sh.shard_index, sh.virtual_users, r.target_url, r.method, r.duration_seconds`,
+		RETURNING sh.run_id, sh.shard_index, sh.virtual_users, r.target_url, r.method, r.duration_seconds, r.headers, r.body`,
 		shardID,
-	).Scan(&a.RunID, &a.ShardIndex, &a.VirtualUsers, &a.TargetURL, &a.Method, &a.DurationSeconds)
+	).Scan(&a.RunID, &a.ShardIndex, &a.VirtualUsers, &a.TargetURL, &a.Method, &a.DurationSeconds, &headersJSON, &body)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, s.shardMiss(ctx, shardID, miss)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("start shard: %w", err)
 	}
+	if len(headersJSON) > 0 {
+		if err := json.Unmarshal(headersJSON, &a.Headers); err != nil {
+			return nil, fmt.Errorf("unmarshal shard headers: %w", err)
+		}
+	}
+	a.Body = body.String
 	// First shard to start flips the run to running (idempotent via the guard).
 	if _, err := s.db.ExecContext(ctx,
 		`UPDATE test_runs SET status = 'running', started_at = now() WHERE id = $1 AND status = 'queued'`,

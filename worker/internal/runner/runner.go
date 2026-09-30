@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -21,6 +22,10 @@ type Config struct {
 	VirtualUsers   int
 	Duration       time.Duration
 	RequestTimeout time.Duration
+	// Phase 5: optional request shape. Headers are set on every request; Body is
+	// the raw payload sent with each request (empty means no body).
+	Headers map[string]string
+	Body    string
 }
 
 // Result is the aggregated outcome of a run. Its fields map 1:1 onto the
@@ -94,14 +99,19 @@ func doRequest(ctx context.Context, client *http.Client, cfg Config, s *vuStats)
 	// ALSO cancelled if the run's duration ends or the worker shuts down first.
 	reqCtx, cancel := context.WithTimeout(ctx, cfg.RequestTimeout)
 	defer cancel()
-
-	req, err := http.NewRequestWithContext(reqCtx, cfg.Method, cfg.TargetURL, nil)
+	var body io.Reader
+	if cfg.Body != "" {
+		body = strings.NewReader(cfg.Body)
+	}
+	req, err := http.NewRequestWithContext(reqCtx, cfg.Method, cfg.TargetURL, body)
 	if err != nil {
 		s.record(0, false, false) // couldn't even build the request
 		requestsTotal.WithLabelValues("error", cfg.Method).Inc()
 		return
 	}
-
+	for k, v := range cfg.Headers {
+		req.Header.Set(k, v)
+	}
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {

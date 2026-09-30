@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS test_runs (
     status           TEXT        NOT NULL DEFAULT 'queued'
                      CHECK (status IN ('queued', 'running', 'completed', 'failed')),
     shard_count      INTEGER     NOT NULL DEFAULT 1,
+    headers          JSONB,
+    body             TEXT,
     total_requests      BIGINT,
     successful_requests BIGINT,
     failed_requests     BIGINT,

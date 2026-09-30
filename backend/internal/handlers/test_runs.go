@@ -28,6 +28,8 @@ const (
 	maxVirtualUsers    = 1000
 	maxDurationSeconds = 3600 // 1 hour
 	maxShards          = 64
+	maxHeaders         = 50
+	maxBodyBytes       = 1 << 20 // 1 MiB
 )
 
 // CreateTestRun handles POST /test-runs. It decodes and validates the request,
@@ -127,6 +129,14 @@ func validateCreate(req *models.CreateTestRunRequest) string {
 		return "shards exceeds the maximum of " + strconv.Itoa(maxShards)
 	case req.Shards > req.VirtualUsers:
 		return "shards cannot exceed virtualUsers (each shard needs at least one VU)"
+	}
+
+	// Phase 5: optional request shape.
+	if len(req.Headers) > maxHeaders {
+		return "too many headers (max " + strconv.Itoa(maxHeaders) + ")"
+	}
+	if len(req.Body) > maxBodyBytes {
+		return "body exceeds the maximum of " + strconv.Itoa(maxBodyBytes) + " bytes"
 	}
 
 	return ""

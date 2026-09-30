@@ -2,8 +2,10 @@ package runner
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -77,6 +79,52 @@ func TestRun_AllErrors(t *testing.T) {
 	}
 	if res.FailedRequests != res.TotalRequests {
 		t.Errorf("expected all %d requests to fail, got %d", res.TotalRequests, res.FailedRequests)
+	}
+}
+
+// TestRun_SendsHeadersAndBody: the runner must apply cfg.Method, cfg.Headers, and
+// cfg.Body to every request. Capturing a request's body AFTER many have been sent
+// also proves the body reader is fresh per request (a shared, consumed reader would
+// leave later requests with an empty body).
+func TestRun_SendsHeadersAndBody(t *testing.T) {
+	var mu sync.Mutex
+	var gotMethod, gotHeader, gotBody string
+	var sawRequest bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		gotMethod, gotHeader, gotBody, sawRequest = r.Method, r.Header.Get("X-Test-Token"), string(b), true
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	_, err := Run(context.Background(), Config{
+		TargetURL:      srv.URL,
+		Method:         http.MethodPost,
+		VirtualUsers:   2,
+		Duration:       200 * time.Millisecond,
+		RequestTimeout: time.Second,
+		Headers:        map[string]string{"X-Test-Token": "abc123"},
+		Body:           `{"hello":"world"}`,
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !sawRequest {
+		t.Fatal("server received no request")
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method: got %q, want POST", gotMethod)
+	}
+	if gotHeader != "abc123" {
+		t.Errorf("header X-Test-Token: got %q, want abc123", gotHeader)
+	}
+	if gotBody != `{"hello":"world"}` {
+		t.Errorf("body: got %q, want the JSON payload", gotBody)
 	}
 }
 

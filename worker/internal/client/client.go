@@ -55,13 +55,15 @@ type CompleteRequest struct {
 // ShardAssignment is what the backend returns when the worker starts/takes over a
 // shard: the slice of load this worker should run.
 type ShardAssignment struct {
-	ShardID         int64  `json:"shardId"`
-	RunID           int64  `json:"runId"`
-	ShardIndex      int    `json:"shardIndex"`
-	TargetURL       string `json:"targetUrl"`
-	Method          string `json:"method"`
-	VirtualUsers    int    `json:"virtualUsers"`
-	DurationSeconds int    `json:"durationSeconds"`
+	ShardID         int64             `json:"shardId"`
+	RunID           int64             `json:"runId"`
+	ShardIndex      int               `json:"shardIndex"`
+	TargetURL       string            `json:"targetUrl"`
+	Method          string            `json:"method"`
+	VirtualUsers    int               `json:"virtualUsers"`
+	DurationSeconds int               `json:"durationSeconds"`
+	Headers         map[string]string `json:"headers,omitempty"`
+	Body            string            `json:"body,omitempty"`
 }
 
 // CompleteShardRequest is the partial result the worker reports for one shard.

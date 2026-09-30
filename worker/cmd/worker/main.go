@@ -270,6 +270,8 @@ func executeShard(ctx context.Context, a *client.ShardAssignment) client.Complet
 		VirtualUsers:   a.VirtualUsers,
 		Duration:       time.Duration(a.DurationSeconds) * time.Second,
 		RequestTimeout: 5 * time.Second,
+		Headers:        a.Headers,
+		Body:           a.Body,
 	}
 
 	res, err := runner.Run(ctx, cfg)
