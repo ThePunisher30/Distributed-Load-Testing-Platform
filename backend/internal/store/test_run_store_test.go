@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -363,6 +364,51 @@ func TestStore_Shards(t *testing.T) {
 	wantF64(t, "max", done.MaxLatencyMs, 9)            // max(8, 9)
 	if done.CompletedAt == nil {
 		t.Error("completedAt should be set")
+	}
+}
+
+// TestStore_ShardBarrierConcurrent: when a run's last two shards finish at the
+// SAME time (two workers completing at once, each on its own connection), the
+// completion barrier must still fire exactly once and complete the run. Before the
+// run-row lock in finishShard, both transactions saw the other shard still
+// 'running' and neither aggregated, leaving the run stuck 'running'. Looped so the
+// timing-dependent race is reliably exercised.
+func TestStore_ShardBarrierConcurrent(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	for i := 0; i < 20; i++ {
+		run, ids, err := s.CreateWithShards(ctx, sampleCreate("concurrent"), []int{5, 5})
+		if err != nil {
+			t.Fatalf("iter %d CreateWithShards: %v", i, err)
+		}
+		if _, err := s.StartShard(ctx, ids[0]); err != nil {
+			t.Fatalf("iter %d StartShard 0: %v", i, err)
+		}
+		if _, err := s.StartShard(ctx, ids[1]); err != nil {
+			t.Fatalf("iter %d StartShard 1: %v", i, err)
+		}
+
+		// Fire both completions at once (released together via the start channel).
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for _, id := range ids {
+			wg.Add(1)
+			go func(id int64) {
+				defer wg.Done()
+				<-start
+				if err := s.CompleteShard(ctx, id, shardPartial(5, 5, 0, 5, 3, 1, 5)); err != nil {
+					t.Errorf("iter %d CompleteShard: %v", i, err)
+				}
+			}(id)
+		}
+		close(start)
+		wg.Wait()
+
+		done, _ := s.GetByID(ctx, run.ID)
+		if done.Status != models.StatusCompleted {
+			t.Fatalf("iter %d: run status = %q, want completed (barrier race)", i, done.Status)
+		}
 	}
 }
 

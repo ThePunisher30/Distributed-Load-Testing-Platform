@@ -448,6 +448,17 @@ func (s *TestRunStore) finishShard(ctx context.Context, shardID int64, set strin
 		return fmt.Errorf("finish shard: %w", err)
 	}
 
+	// Serialize the completion barrier on the parent run. Without this lock, two
+	// shards finishing at the same instant each run under READ COMMITTED and see
+	// the other still 'running' (its terminal status not yet committed), so BOTH
+	// count remaining > 0 and neither aggregates -- the run hangs forever. Locking
+	// the run row forces the two barrier checks to run one after the other, so
+	// whichever commits last sees every other shard already terminal and fires the
+	// aggregation exactly once.
+	if _, err := tx.ExecContext(ctx, `SELECT 1 FROM test_runs WHERE id = $1 FOR UPDATE`, runID); err != nil {
+		return fmt.Errorf("lock run for barrier: %w", err)
+	}
+
 	var remaining int
 	if err := tx.QueryRowContext(ctx,
 		`SELECT count(*) FROM test_run_shards WHERE run_id = $1 AND status IN ('queued', 'running')`,
