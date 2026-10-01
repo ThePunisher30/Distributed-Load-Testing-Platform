@@ -292,6 +292,7 @@ func executeShard(ctx context.Context, a *client.ShardAssignment) client.Complet
 		AvgLatencyMs:       &res.AvgLatencyMs,
 		MinLatencyMs:       &res.MinLatencyMs,
 		MaxLatencyMs:       &res.MaxLatencyMs,
+		LatencyBuckets:     res.LatencyBuckets,
 	}
 }
 

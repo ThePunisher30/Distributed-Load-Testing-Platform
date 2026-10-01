@@ -34,6 +34,9 @@ type TestRun struct {
 	AvgLatencyMs       *float64 `json:"avgLatencyMs,omitempty"`
 	MinLatencyMs       *float64 `json:"minLatencyMs,omitempty"`
 	MaxLatencyMs       *float64 `json:"maxLatencyMs,omitempty"`
+	P50LatencyMs       *float64 `json:"p50LatencyMs,omitempty"`
+	P95LatencyMs       *float64 `json:"p95LatencyMs,omitempty"`
+	P99LatencyMs       *float64 `json:"p99LatencyMs,omitempty"`
 	ErrorMessage       *string  `json:"errorMessage,omitempty"`
 
 	// Lifecycle timestamps.
@@ -86,7 +89,10 @@ type CompleteShardRequest struct {
 	AvgLatencyMs       *float64 `json:"avgLatencyMs"`
 	MinLatencyMs       *float64 `json:"minLatencyMs"`
 	MaxLatencyMs       *float64 `json:"maxLatencyMs"`
-	ErrorMessage       *string  `json:"errorMessage"`
+	// LatencyBuckets is this shard's latency histogram (bucket counts). The backend
+	// merges these across shards to compute the run's percentiles.
+	LatencyBuckets []int64 `json:"latencyBuckets,omitempty"`
+	ErrorMessage   *string `json:"errorMessage"`
 }
 
 // CompleteTestRunRequest is the JSON body a worker sends to report the outcome

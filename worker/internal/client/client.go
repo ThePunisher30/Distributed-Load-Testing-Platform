@@ -76,6 +76,7 @@ type CompleteShardRequest struct {
 	AvgLatencyMs       *float64 `json:"avgLatencyMs,omitempty"`
 	MinLatencyMs       *float64 `json:"minLatencyMs,omitempty"`
 	MaxLatencyMs       *float64 `json:"maxLatencyMs,omitempty"`
+	LatencyBuckets     []int64  `json:"latencyBuckets,omitempty"`
 	ErrorMessage       *string  `json:"errorMessage,omitempty"`
 }
 

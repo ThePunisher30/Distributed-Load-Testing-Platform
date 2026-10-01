@@ -49,7 +49,8 @@ func NewTestRunStore(db *sql.DB) *TestRunStore {
 const testRunColumns = `
 	id, name, target_url, method, virtual_users, duration_seconds, status, shard_count,
 	total_requests, successful_requests, failed_requests,
-	avg_latency_ms, min_latency_ms, max_latency_ms, error_message,
+	avg_latency_ms, min_latency_ms, max_latency_ms,
+	p50_latency_ms, p95_latency_ms, p99_latency_ms, error_message,
 	created_at, started_at, completed_at`
 
 // scanRow reads one row (from Query or QueryRow) into a TestRun. Nullable
@@ -60,7 +61,8 @@ func scanRow(row interface{ Scan(...any) error }) (*models.TestRun, error) {
 		&tr.ID, &tr.Name, &tr.TargetURL, &tr.Method, &tr.VirtualUsers,
 		&tr.DurationSeconds, &tr.Status, &tr.ShardCount,
 		&tr.TotalRequests, &tr.SuccessfulRequests, &tr.FailedRequests,
-		&tr.AvgLatencyMs, &tr.MinLatencyMs, &tr.MaxLatencyMs, &tr.ErrorMessage,
+		&tr.AvgLatencyMs, &tr.MinLatencyMs, &tr.MaxLatencyMs,
+		&tr.P50LatencyMs, &tr.P95LatencyMs, &tr.P99LatencyMs, &tr.ErrorMessage,
 		&tr.CreatedAt, &tr.StartedAt, &tr.CompletedAt,
 	)
 	if err != nil {
@@ -411,6 +413,15 @@ func aggregateRun(ctx context.Context, tx *sql.Tx, runID int64) error {
 	if latCount > 0 {
 		avg = sumLat / float64(latCount) // weighted across shards, not avg-of-avgs
 	}
+
+	// Merge the shards' latency histograms and compute the run's percentiles.
+	// Percentiles cannot be averaged across shards, so we add the shards' bucket
+	// counts element-wise and compute p50/p95/p99 from the combined histogram.
+	p50, p95, p99, err := runPercentiles(ctx, tx, runID)
+	if err != nil {
+		return err
+	}
+
 	status := models.StatusCompleted
 	var errMsg any
 	if failedShards > 0 {
@@ -421,13 +432,44 @@ func aggregateRun(ctx context.Context, tx *sql.Tx, runID int64) error {
 		UPDATE test_runs
 		SET status = $2, total_requests = $3, successful_requests = $4, failed_requests = $5,
 		    avg_latency_ms = $6, min_latency_ms = $7, max_latency_ms = $8,
-		    error_message = $9, completed_at = now()
+		    p50_latency_ms = $9, p95_latency_ms = $10, p99_latency_ms = $11,
+		    error_message = $12, completed_at = now()
 		WHERE id = $1 AND status = 'running'`,
-		runID, status, total, success, failed, avg, minMs.Float64, maxMs.Float64, errMsg,
+		runID, status, total, success, failed, avg, minMs.Float64, maxMs.Float64,
+		p50, p95, p99, errMsg,
 	); err != nil {
 		return fmt.Errorf("aggregate run: %w", err)
 	}
 	return nil
+}
+
+// runPercentiles merges every shard's latency histogram for the run and returns
+// p50/p95/p99 computed from the combined bucket counts. Shards with no histogram
+// (e.g. a failed shard, or pre-Phase-5 data) contribute nothing.
+func runPercentiles(ctx context.Context, tx *sql.Tx, runID int64) (p50, p95, p99 float64, err error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT latency_buckets FROM test_run_shards WHERE run_id = $1 AND latency_buckets IS NOT NULL`, runID)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("select shard histograms: %w", err)
+	}
+	defer rows.Close()
+	var all [][]int64
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return 0, 0, 0, fmt.Errorf("scan histogram: %w", err)
+		}
+		var b []int64
+		if err := json.Unmarshal(raw, &b); err != nil {
+			return 0, 0, 0, fmt.Errorf("unmarshal histogram: %w", err)
+		}
+		all = append(all, b)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, 0, fmt.Errorf("iterate histograms: %w", err)
+	}
+	merged := mergeBuckets(all)
+	return percentile(merged, 0.50), percentile(merged, 0.95), percentile(merged, 0.99), nil
 }
 
 // finishShard records a shard as terminal and, if it was the run's last
@@ -476,18 +518,29 @@ func (s *TestRunStore) finishShard(ctx context.Context, shardID int64, set strin
 // CompleteShard records a running shard's partial result. If it is the run's
 // last shard, the run is aggregated and marked terminal.
 func (s *TestRunStore) CompleteShard(ctx context.Context, shardID int64, req models.CompleteShardRequest) error {
+	// The latency histogram travels as a JSON array cast to jsonb ($11::jsonb); an
+	// empty one goes in as NULL and contributes nothing to the run's percentiles.
+	var buckets any
+	if len(req.LatencyBuckets) > 0 {
+		j, err := json.Marshal(req.LatencyBuckets)
+		if err != nil {
+			return fmt.Errorf("marshal latency buckets: %w", err)
+		}
+		buckets = string(j)
+	}
 	const q = `
 		UPDATE test_run_shards
 		SET status = $2, error_message = $3,
 		    total_requests = $4, successful_requests = $5, failed_requests = $6,
 		    latency_count = $7, avg_latency_ms = $8, min_latency_ms = $9, max_latency_ms = $10,
+		    latency_buckets = $11::jsonb,
 		    completed_at = now()
 		WHERE id = $1 AND status = 'running'
 		RETURNING run_id`
 	return s.finishShard(ctx, shardID, q, ErrNotRunning,
 		shardID, req.Status, req.ErrorMessage,
 		req.TotalRequests, req.SuccessfulRequests, req.FailedRequests,
-		req.LatencyCount, req.AvgLatencyMs, req.MinLatencyMs, req.MaxLatencyMs)
+		req.LatencyCount, req.AvgLatencyMs, req.MinLatencyMs, req.MaxLatencyMs, buckets)
 }
 
 // FailShard marks a shard failed (dead-letter). It accepts a queued or running
