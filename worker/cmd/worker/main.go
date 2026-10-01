@@ -32,18 +32,22 @@ const (
 func main() {
 	backendURL := getenv("BACKEND_URL", "http://localhost:8080")
 	redisAddr := getenv("REDIS_ADDR", "localhost:6379")
-	// A message unacked longer than this is presumed orphaned (its worker died)
-	// and is reclaimed. CAVEAT: this MUST exceed the longest job a worker can be
-	// processing. A running worker does not ack until its job finishes, so its
-	// in-flight message looks "idle" the whole time; if reclaimMinIdle is shorter
-	// than the job, another live worker will reclaim a job that is still running,
-	// causing double execution. Idempotency (the state-guarded complete) keeps the
-	// stored result correct, but the work is wasted. The proper fix is a
-	// heartbeat/lease that refreshes the claim during a long job (Phase 6).
-	reclaimMinIdle := getdur("RECLAIM_MIN_IDLE", 30*time.Second)
+	// A message whose idle time exceeds this is presumed orphaned (its worker
+	// died) and is reclaimed. A live worker refreshes its claim every
+	// heartbeatInterval (see heartbeat()), so its in-flight message never looks
+	// idle while the worker is alive. This therefore only has to exceed the
+	// heartbeat interval (plus margin), NOT the job duration. (Phase 6 fix: before
+	// the heartbeat this had to outlast the longest job, or a slow-but-alive worker
+	// got reclaimed and its job ran twice.)
+	reclaimMinIdle := getdur("RECLAIM_MIN_IDLE", 15*time.Second)
 	// A message delivered more than this many times is dead-lettered instead of
 	// retried again (a poison job that can never be processed).
 	maxDeliveries := getint("MAX_DELIVERIES", 5)
+	// Phase 6: while processing a job, the worker refreshes its claim this often
+	// (a heartbeat/lease) so the message never looks idle while the worker is
+	// alive. reclaimMinIdle now only needs to exceed this interval, not the job
+	// duration -- a dead worker simply stops heartbeating and is reclaimed.
+	heartbeatInterval := getdur("HEARTBEAT_INTERVAL", 2*time.Second)
 
 	// Cancel the root context on Ctrl-C / SIGTERM so an in-flight run can stop.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -93,7 +97,7 @@ func main() {
 		}
 
 		// First reclaim any message a crashed worker left unacked past the timeout.
-		reclaimStuck(ctx, c, rdb, consumerName, reclaimMinIdle, maxDeliveries)
+		reclaimStuck(ctx, c, rdb, consumerName, reclaimMinIdle, maxDeliveries, heartbeatInterval)
 
 		// Block up to 5s waiting for a message not yet delivered to the group (">").
 		res, err := rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
@@ -116,7 +120,33 @@ func main() {
 
 		for _, stream := range res {
 			for _, msg := range stream.Messages {
-				handleMessage(ctx, c, rdb, msg, false)
+				handleMessage(ctx, c, rdb, msg, false, consumerName, heartbeatInterval)
+			}
+		}
+	}
+}
+
+// heartbeat keeps this worker's claim on msgID fresh while a job runs: every
+// interval it re-claims the message to itself (resetting its idle time, without
+// bumping the delivery counter), proving the worker is still alive. It returns
+// when ctx is cancelled (the job finished, or the worker is shutting down).
+func heartbeat(ctx context.Context, rdb *redis.Client, consumer, msgID string, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			err := rdb.XClaimJustID(ctx, &redis.XClaimArgs{
+				Stream:   streamKey,
+				Group:    groupName,
+				Consumer: consumer,
+				MinIdle:  0, // claim regardless of current idle; this resets idle to 0
+				Messages: []string{msgID},
+			}).Err()
+			if err != nil && ctx.Err() == nil {
+				log.Printf("heartbeat (XCLAIM %s) failed: %v", msgID, err)
 			}
 		}
 	}
@@ -127,7 +157,7 @@ func main() {
 // if they have already been delivered too many times (a poison job), dead-letters
 // them. We use XPENDING (not XAUTOCLAIM) because it reports each message's
 // delivery count, which is what decides retry vs dead-letter.
-func reclaimStuck(ctx context.Context, c *client.Client, rdb *redis.Client, consumer string, minIdle time.Duration, maxDeliveries int) {
+func reclaimStuck(ctx context.Context, c *client.Client, rdb *redis.Client, consumer string, minIdle time.Duration, maxDeliveries int, heartbeatInterval time.Duration) {
 	pending, err := rdb.XPendingExt(ctx, &redis.XPendingExtArgs{
 		Stream: streamKey,
 		Group:  groupName,
@@ -165,7 +195,7 @@ func reclaimStuck(ctx context.Context, c *client.Client, rdb *redis.Client, cons
 		}
 		for _, msg := range msgs {
 			log.Printf("reclaiming idle message %s (delivery %d) — its worker is presumed dead", msg.ID, p.RetryCount)
-			handleMessage(ctx, c, rdb, msg, true)
+			handleMessage(ctx, c, rdb, msg, true, consumer, heartbeatInterval)
 		}
 	}
 }
@@ -207,7 +237,7 @@ func deadLetter(ctx context.Context, c *client.Client, rdb *redis.Client, msgID 
 // then acknowledge the message. Acking removes the message from the group's
 // pending list so it is not redelivered. On a transient failure we deliberately
 // do NOT ack, so the message stays pending and can be retried/reclaimed later.
-func handleMessage(ctx context.Context, c *client.Client, rdb *redis.Client, msg redis.XMessage, reclaimed bool) {
+func handleMessage(ctx context.Context, c *client.Client, rdb *redis.Client, msg redis.XMessage, reclaimed bool, consumer string, heartbeatInterval time.Duration) {
 	idStr, _ := msg.Values["shard_id"].(string)
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
@@ -241,7 +271,14 @@ func handleMessage(ctx context.Context, c *client.Client, rdb *redis.Client, msg
 	log.Printf("claimed run %d shard %d: %d VUs for %ds against %s",
 		a.RunID, a.ShardIndex, a.VirtualUsers, a.DurationSeconds, a.TargetURL)
 
+	// Keep our claim alive while the job runs (the lease/heartbeat), so a
+	// slow-but-alive worker is never mistaken for a dead one and reclaimed. The
+	// heartbeat stops the moment the job returns, before we complete/ack.
+	hbCtx, stopHeartbeat := context.WithCancel(ctx)
+	go heartbeat(hbCtx, rdb, consumer, msg.ID, heartbeatInterval)
+
 	result := executeShard(ctx, a)
+	stopHeartbeat()
 	if err := c.CompleteShard(ctx, a.ShardID, result); err != nil {
 		// Ran the load but couldn't report it: leave pending so completion retries.
 		log.Printf("failed to report shard %d completion: %v (leaving pending)", id, err)

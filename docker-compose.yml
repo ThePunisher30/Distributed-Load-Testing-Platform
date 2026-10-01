@@ -60,9 +60,13 @@ services:
       # Reach the backend and broker by service name.
       BACKEND_URL: http://backend:8080
       REDIS_ADDR: redis:6379
-      # Reclaim a message unacked this long (short here since demo runs are brief;
-      # in production this must exceed the longest possible job).
+      # Reclaim a message whose idle time exceeds this (its worker is presumed
+      # dead). With the heartbeat below, this only needs to exceed the heartbeat
+      # interval, not the job duration.
       RECLAIM_MIN_IDLE: 10s
+      # How often a worker refreshes its claim while processing, so a live worker
+      # is never mistaken for a dead one (Phase 6 lease/heartbeat).
+      HEARTBEAT_INTERVAL: 2s
       # Dead-letter a message after this many delivery attempts (low for the demo).
       MAX_DELIVERIES: 3
     # Each replica serves /metrics on :9100 (internal). No host port is mapped
