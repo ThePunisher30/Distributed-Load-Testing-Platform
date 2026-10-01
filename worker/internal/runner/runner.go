@@ -26,6 +26,9 @@ type Config struct {
 	// the raw payload sent with each request (empty means no body).
 	Headers map[string]string
 	Body    string
+	// ThinkTime is how long each virtual user pauses between requests (0 = none,
+	// the original back-to-back closed-loop behavior).
+	ThinkTime time.Duration
 }
 
 // Result is the aggregated outcome of a run. Its fields map 1:1 onto the
@@ -97,6 +100,16 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 func runVirtualUser(ctx context.Context, client *http.Client, cfg Config, s *vuStats) {
 	for ctx.Err() == nil {
 		doRequest(ctx, client, cfg, s)
+		// Pause between requests (think-time), but wake early if the run ends so we
+		// don't overrun the deadline. time.After already waits ThinkTime, so the
+		// case body is empty. Skip the whole thing when there is no think-time.
+		if cfg.ThinkTime > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(cfg.ThinkTime):
+			}
+		}
 	}
 }
 

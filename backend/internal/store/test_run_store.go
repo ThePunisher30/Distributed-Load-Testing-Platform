@@ -118,10 +118,10 @@ func (s *TestRunStore) CreateWithShards(ctx context.Context, req models.CreateTe
 	}
 
 	run, err := scanRow(tx.QueryRowContext(ctx, `
-		INSERT INTO test_runs (name, target_url, method, virtual_users, duration_seconds, shard_count, headers, body)
-		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+		INSERT INTO test_runs (name, target_url, method, virtual_users, duration_seconds, shard_count, headers, body, think_time_ms)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
 		RETURNING `+testRunColumns,
-		req.Name, req.TargetURL, req.Method, req.VirtualUsers, req.DurationSeconds, len(shardVUs), headers, body))
+		req.Name, req.TargetURL, req.Method, req.VirtualUsers, req.DurationSeconds, len(shardVUs), headers, body, req.ThinkTimeMs))
 	if err != nil {
 		return nil, nil, fmt.Errorf("insert run: %w", err)
 	}
@@ -351,9 +351,9 @@ func (s *TestRunStore) startShard(ctx context.Context, shardID int64, allowRunni
 		SET status = 'running', started_at = now()
 		FROM test_runs r
 		WHERE sh.id = $1 AND r.id = sh.run_id AND `+guard+`
-		RETURNING sh.run_id, sh.shard_index, sh.virtual_users, r.target_url, r.method, r.duration_seconds, r.headers, r.body`,
+		RETURNING sh.run_id, sh.shard_index, sh.virtual_users, r.target_url, r.method, r.duration_seconds, r.headers, r.body, r.think_time_ms`,
 		shardID,
-	).Scan(&a.RunID, &a.ShardIndex, &a.VirtualUsers, &a.TargetURL, &a.Method, &a.DurationSeconds, &headersJSON, &body)
+	).Scan(&a.RunID, &a.ShardIndex, &a.VirtualUsers, &a.TargetURL, &a.Method, &a.DurationSeconds, &headersJSON, &body, &a.ThinkTimeMs)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, s.shardMiss(ctx, shardID, miss)
 	}

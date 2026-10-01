@@ -61,6 +61,9 @@ type CreateTestRunRequest struct {
 	// the raw request payload (for POST/PUT/PATCH). Both default to empty.
 	Headers map[string]string `json:"headers,omitempty"`
 	Body    string            `json:"body,omitempty"`
+	// ThinkTimeMs is how long each virtual user pauses between requests, in
+	// milliseconds (0 = back-to-back, the default).
+	ThinkTimeMs int `json:"thinkTimeMs,omitempty"`
 }
 
 // ShardAssignment is what the backend returns when a worker starts (or takes
@@ -75,6 +78,7 @@ type ShardAssignment struct {
 	DurationSeconds int               `json:"durationSeconds"`
 	Headers         map[string]string `json:"headers,omitempty"`
 	Body            string            `json:"body,omitempty"`
+	ThinkTimeMs     int               `json:"thinkTimeMs,omitempty"`
 }
 
 // CompleteShardRequest is the partial result a worker reports for one shard.

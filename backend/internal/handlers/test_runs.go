@@ -29,7 +29,8 @@ const (
 	maxDurationSeconds = 3600 // 1 hour
 	maxShards          = 64
 	maxHeaders         = 50
-	maxBodyBytes       = 1 << 20 // 1 MiB
+	maxBodyBytes       = 1 << 20   // 1 MiB
+	maxThinkTimeMs     = 60 * 1000 // 60s between requests
 )
 
 // CreateTestRun handles POST /test-runs. It decodes and validates the request,
@@ -137,6 +138,12 @@ func validateCreate(req *models.CreateTestRunRequest) string {
 	}
 	if len(req.Body) > maxBodyBytes {
 		return "body exceeds the maximum of " + strconv.Itoa(maxBodyBytes) + " bytes"
+	}
+	if req.ThinkTimeMs < 0 {
+		return "thinkTimeMs must not be negative"
+	}
+	if req.ThinkTimeMs > maxThinkTimeMs {
+		return "thinkTimeMs exceeds the maximum of " + strconv.Itoa(maxThinkTimeMs)
 	}
 
 	return ""

@@ -64,6 +64,7 @@ type ShardAssignment struct {
 	DurationSeconds int               `json:"durationSeconds"`
 	Headers         map[string]string `json:"headers,omitempty"`
 	Body            string            `json:"body,omitempty"`
+	ThinkTimeMs     int               `json:"thinkTimeMs,omitempty"`
 }
 
 // CompleteShardRequest is the partial result the worker reports for one shard.

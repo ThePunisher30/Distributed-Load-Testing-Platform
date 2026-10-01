@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS test_runs (
     shard_count      INTEGER     NOT NULL DEFAULT 1,
     headers          JSONB,
     body             TEXT,
+    think_time_ms    INTEGER     NOT NULL DEFAULT 0,
     total_requests      BIGINT,
     successful_requests BIGINT,
     failed_requests     BIGINT,

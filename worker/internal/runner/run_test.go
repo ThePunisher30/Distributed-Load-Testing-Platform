@@ -128,6 +128,36 @@ func TestRun_SendsHeadersAndBody(t *testing.T) {
 	}
 }
 
+// TestRun_ThinkTimeInterruptible: a think-time pause must be cut short when the
+// run's duration ends, so the run never overruns its deadline by the think-time.
+func TestRun_ThinkTimeInterruptible(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	start := time.Now()
+	res, err := Run(context.Background(), Config{
+		TargetURL:      srv.URL,
+		Method:         http.MethodGet,
+		VirtualUsers:   2,
+		Duration:       200 * time.Millisecond,
+		RequestTimeout: time.Second,
+		ThinkTime:      10 * time.Second, // far longer than the run itself
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	// The run must end at ~Duration, not block for the 10s think-time: the pause is
+	// interrupted when the run context is cancelled.
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("Run took %v; the think-time pause was not interrupted by the deadline", elapsed)
+	}
+	if res.TotalRequests < 1 {
+		t.Errorf("expected each VU to fire at least once before pausing, got %d", res.TotalRequests)
+	}
+}
+
 // TestRun_BadConfig: Run returns an error for a config it cannot start.
 func TestRun_BadConfig(t *testing.T) {
 	if _, err := Run(context.Background(), Config{TargetURL: "http://x", VirtualUsers: 0, Duration: time.Second}); err == nil {
