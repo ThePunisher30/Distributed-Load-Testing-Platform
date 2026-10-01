@@ -152,6 +152,34 @@ func heartbeat(ctx context.Context, rdb *redis.Client, consumer, msgID string, i
 	}
 }
 
+// watchCancel polls the run's status while a shard runs; if the user cancelled the
+// run (it goes to "cancelling"/"cancelled"), it cancels runCtx so the load stops
+// early -- the same mechanism the run's duration elapsing uses. It also returns
+// when ctx (the job lifecycle) is cancelled.
+func watchCancel(ctx context.Context, c *client.Client, runID int64, cancelRun context.CancelFunc, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			status, err := c.RunStatus(ctx, runID)
+			if err != nil {
+				if ctx.Err() == nil {
+					log.Printf("cancel-watch for run %d failed: %v", runID, err)
+				}
+				continue
+			}
+			if status == "cancelling" || status == "cancelled" {
+				log.Printf("run %d cancelled by user; stopping load", runID)
+				cancelRun()
+				return
+			}
+		}
+	}
+}
+
 // reclaimStuck finds messages pending (unacked) longer than minIdle -- the
 // signal that the worker holding them has died -- and either reprocesses them or,
 // if they have already been delivered too many times (a poison job), dead-letters
@@ -271,14 +299,21 @@ func handleMessage(ctx context.Context, c *client.Client, rdb *redis.Client, msg
 	log.Printf("claimed run %d shard %d: %d VUs for %ds against %s",
 		a.RunID, a.ShardIndex, a.VirtualUsers, a.DurationSeconds, a.TargetURL)
 
-	// Keep our claim alive while the job runs (the lease/heartbeat), so a
-	// slow-but-alive worker is never mistaken for a dead one and reclaimed. The
-	// heartbeat stops the moment the job returns, before we complete/ack.
-	hbCtx, stopHeartbeat := context.WithCancel(ctx)
-	go heartbeat(hbCtx, rdb, consumer, msg.ID, heartbeatInterval)
+	// Background helpers that live only as long as this job:
+	//   - heartbeat keeps our claim fresh so a slow-but-alive worker is not
+	//     reclaimed (Phase 6 lease);
+	//   - watchCancel cancels runCtx if the user cancels the run, stopping the load
+	//     early.
+	// runCtx is the context the load runs under; cancelling it (by the watcher, or
+	// by us on return) stops the VUs, exactly like the duration elapsing does.
+	bgCtx, stopBg := context.WithCancel(ctx)
+	runCtx, cancelRun := context.WithCancel(ctx)
+	go heartbeat(bgCtx, rdb, consumer, msg.ID, heartbeatInterval)
+	go watchCancel(bgCtx, c, a.RunID, cancelRun, heartbeatInterval)
 
-	result := executeShard(ctx, a)
-	stopHeartbeat()
+	result := executeShard(runCtx, a)
+	stopBg()
+	cancelRun()
 	if err := c.CompleteShard(ctx, a.ShardID, result); err != nil {
 		// Ran the load but couldn't report it: leave pending so completion retries.
 		log.Printf("failed to report shard %d completion: %v (leaving pending)", id, err)

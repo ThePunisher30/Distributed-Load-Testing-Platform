@@ -5,10 +5,12 @@ import "time"
 
 // Status values a test run moves through over its lifetime.
 const (
-	StatusQueued    = "queued"    // created, waiting for a worker
-	StatusRunning   = "running"   // claimed by a worker, load in progress
-	StatusCompleted = "completed" // finished successfully, results populated
-	StatusFailed    = "failed"    // could not be completed
+	StatusQueued     = "queued"     // created, waiting for a worker
+	StatusRunning    = "running"    // claimed by a worker, load in progress
+	StatusCompleted  = "completed"  // finished successfully, results populated
+	StatusFailed     = "failed"     // could not be completed
+	StatusCancelling = "cancelling" // user asked to cancel; workers winding down
+	StatusCancelled  = "cancelled"  // cancellation finalized (terminal)
 )
 
 // TestRun mirrors one row of the test_runs table. It carries both the test

@@ -296,6 +296,32 @@ func (c *Client) postJSON(ctx context.Context, path string, body any) error {
 	return nil
 }
 
+// RunStatus fetches a run's current status from the public API. The worker polls
+// it while executing a shard to notice a user-initiated cancellation (the run goes
+// to "cancelling"), so it can stop early.
+func (c *Client) RunStatus(ctx context.Context, runID int64) (string, error) {
+	url := c.baseURL + "/test-runs/" + strconv.FormatInt(runID, 10)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("run status request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("run status returned %s: %s", resp.Status, readBody(resp.Body))
+	}
+	var r struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return "", fmt.Errorf("decode run status: %w", err)
+	}
+	return r.Status, nil
+}
+
 // readBody reads a response body for error messages, ignoring read errors.
 func readBody(r io.Reader) string {
 	b, _ := io.ReadAll(io.LimitReader(r, 2048))

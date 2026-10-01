@@ -171,3 +171,28 @@ func (h *Handler) GetTestRun(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, tr)
 }
+
+// CancelTestRun handles POST /test-runs/{id}/cancel. It asks a queued or running
+// run to stop: the run moves to "cancelling", workers polling its status wind
+// down, and the completion barrier finalizes it to "cancelled" (keeping any
+// partial results). Cancelling an already-finished run is a no-op that returns
+// the run unchanged.
+func (h *Handler) CancelTestRun(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, http.StatusBadRequest, "id must be a positive integer")
+		return
+	}
+
+	tr, err := h.TestRuns.CancelRun(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "test run not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not cancel test run")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, tr)
+}

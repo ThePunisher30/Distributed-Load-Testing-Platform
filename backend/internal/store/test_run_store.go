@@ -319,6 +319,33 @@ func (s *TestRunStore) Complete(ctx context.Context, id int64, req models.Comple
 	return tr, nil
 }
 
+// CancelRun marks a queued or running run as 'cancelling' -- the signal workers
+// poll (via RunStatus) to stop their load early. The completion barrier then
+// finalizes the run to 'cancelled'. A run that is already terminal or already
+// cancelling is returned unchanged (cancel is idempotent); a missing run is
+// ErrNotFound.
+func (s *TestRunStore) CancelRun(ctx context.Context, id int64) (*models.TestRun, error) {
+	query := `
+		UPDATE test_runs
+		SET status = 'cancelling'
+		WHERE id = $1 AND status IN ('queued', 'running')
+		RETURNING ` + testRunColumns
+
+	tr, err := scanRow(s.db.QueryRowContext(ctx, query, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		// Nothing updated: already terminal/cancelling, or missing.
+		existing, getErr := s.GetByID(ctx, id)
+		if getErr != nil {
+			return nil, getErr // ErrNotFound or a real error
+		}
+		return existing, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("cancel run: %w", err)
+	}
+	return tr, nil
+}
+
 // ---- Phase 3 Level 1: shard lifecycle ----
 
 // shardMiss classifies a "no row updated" for a shard: ErrNotFound if the shard
@@ -422,19 +449,32 @@ func aggregateRun(ctx context.Context, tx *sql.Tx, runID int64) error {
 		return err
 	}
 
+	// What state is the run in now? We hold its row lock (from finishShard), so this
+	// read is stable. A run the user cancelled is in 'cancelling' and finalizes to
+	// 'cancelled' (keeping partial results); otherwise it's completed, or failed if
+	// any shard failed.
+	var current string
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM test_runs WHERE id = $1`, runID).Scan(&current); err != nil {
+		return fmt.Errorf("read run status: %w", err)
+	}
 	status := models.StatusCompleted
 	var errMsg any
 	if failedShards > 0 {
 		status = models.StatusFailed
 		errMsg = fmt.Sprintf("%d shard(s) failed", failedShards)
 	}
+	if current == models.StatusCancelling {
+		status = models.StatusCancelled
+		errMsg = "run cancelled by user"
+	}
+	// The barrier fires for a run that is running OR cancelling.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE test_runs
 		SET status = $2, total_requests = $3, successful_requests = $4, failed_requests = $5,
 		    avg_latency_ms = $6, min_latency_ms = $7, max_latency_ms = $8,
 		    p50_latency_ms = $9, p95_latency_ms = $10, p99_latency_ms = $11,
 		    error_message = $12, completed_at = now()
-		WHERE id = $1 AND status = 'running'`,
+		WHERE id = $1 AND status IN ('running', 'cancelling')`,
 		runID, status, total, success, failed, avg, minMs.Float64, maxMs.Float64,
 		p50, p95, p99, errMsg,
 	); err != nil {

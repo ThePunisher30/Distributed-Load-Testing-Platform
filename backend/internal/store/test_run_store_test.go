@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS test_runs (
     virtual_users    INTEGER     NOT NULL CHECK (virtual_users > 0),
     duration_seconds INTEGER     NOT NULL CHECK (duration_seconds > 0),
     status           TEXT        NOT NULL DEFAULT 'queued'
-                     CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+                     CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelling', 'cancelled')),
     shard_count      INTEGER     NOT NULL DEFAULT 1,
     headers          JSONB,
     body             TEXT,
@@ -450,6 +450,55 @@ func TestStore_ShardFailAndTakeover(t *testing.T) {
 	}
 	if a, err := s.TakeOverShard(ctx, ids2[0]); err != nil || a.VirtualUsers != 3 {
 		t.Errorf("TakeOverShard(running) = (%+v, %v), want ok with 3 VUs", a, err)
+	}
+}
+
+// TestStore_CancelRun: cancelling a running run moves it to 'cancelling', and once
+// its shards finish, the completion barrier finalizes it to 'cancelled' (keeping
+// the partial results) rather than 'completed'.
+func TestStore_CancelRun(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	run, ids, _ := s.CreateWithShards(ctx, sampleCreate("cancel"), []int{3, 3})
+	if _, err := s.StartShard(ctx, ids[0]); err != nil {
+		t.Fatalf("StartShard 0: %v", err)
+	}
+
+	// Cancel while running -> cancelling (not yet terminal).
+	cancelled, err := s.CancelRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("CancelRun: %v", err)
+	}
+	if cancelled.Status != models.StatusCancelling {
+		t.Errorf("after cancel status = %q, want cancelling", cancelled.Status)
+	}
+
+	// Shards still finish (workers wind down and report partials); the barrier then
+	// finalizes the run to cancelled.
+	if err := s.CompleteShard(ctx, ids[0], shardPartial(3, 3, 0, 3, 2, 1, 4)); err != nil {
+		t.Fatalf("CompleteShard 0: %v", err)
+	}
+	if _, err := s.StartShard(ctx, ids[1]); err != nil {
+		t.Fatalf("StartShard 1: %v", err)
+	}
+	if err := s.CompleteShard(ctx, ids[1], shardPartial(2, 2, 0, 2, 2, 1, 3)); err != nil {
+		t.Fatalf("CompleteShard 1: %v", err)
+	}
+
+	done, _ := s.GetByID(ctx, run.ID)
+	if done.Status != models.StatusCancelled {
+		t.Fatalf("after shards finish status = %q, want cancelled", done.Status)
+	}
+	wantI64(t, "total", done.TotalRequests, 5) // 3 + 2 partials kept
+	if done.CompletedAt == nil {
+		t.Error("cancelled run should have completedAt set")
+	}
+
+	// Cancelling an already-terminal run is a no-op that returns it unchanged.
+	again, err := s.CancelRun(ctx, run.ID)
+	if err != nil || again.Status != models.StatusCancelled {
+		t.Errorf("re-cancel = (%q, %v), want cancelled no-op", again.Status, err)
 	}
 }
 

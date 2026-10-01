@@ -45,6 +45,7 @@ func (h *Handler) Routes() *http.ServeMux {
 	// Public API (used by end users).
 	mux.HandleFunc("POST /test-runs", h.CreateTestRun)
 	mux.HandleFunc("GET /test-runs/{id}", h.GetTestRun)
+	mux.HandleFunc("POST /test-runs/{id}/cancel", h.CancelTestRun)
 
 	// Internal API (used by workers).
 	// Phase 2: workers receive a job id from Redis and call /start for that id.
