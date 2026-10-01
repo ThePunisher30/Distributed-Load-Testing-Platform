@@ -5,12 +5,13 @@ build a tool that sends HTTP requests, but to understand the system design behin
 distributed workers, orchestration, message queues, metrics, failure handling,
 and observability — by building each piece from scratch.
 
-The platform grows in phases. **Phases 1–4 are complete**: a full test-run
+The platform grows in phases. **Phases 1–5 are complete**: a full test-run
 lifecycle, distributed through a Redis Streams message broker, with worker crash
 recovery and dead-lettering, run across multiple worker replicas — including
 splitting a single run into shards that execute in parallel and are re-aggregated
 — with live Prometheus metrics and a Grafana dashboard showing what happens as a
-run executes.
+run executes. The runner sends custom methods, headers, and bodies with optional
+think-time, and reports latency percentiles (p50/p95/p99) merged across shards.
 
 ```text
 create test run -> backend publishes a job -> worker consumes it ->
@@ -107,8 +108,22 @@ Example result:
   "failedRequests": 0,
   "avgLatencyMs": 8.4,
   "minLatencyMs": 2.1,
-  "maxLatencyMs": 91.7
+  "maxLatencyMs": 91.7,
+  "p50LatencyMs": 5,
+  "p95LatencyMs": 25,
+  "p99LatencyMs": 100
 }
+```
+
+Requests can carry custom `method`, `headers`, and `body`, and a `thinkTimeMs`
+pause between requests (0 = back-to-back). For example, a paced POST:
+
+```bash
+curl -X POST http://localhost:8080/test-runs \
+  -H "Content-Type: application/json" \
+  -d '{"name":"paced","targetUrl":"http://target:8081/fast","method":"POST",
+       "virtualUsers":20,"durationSeconds":10,"shards":4,"thinkTimeMs":500,
+       "headers":{"Authorization":"Bearer t"},"body":"{\"hello\":\"world\"}"}'
 ```
 
 ## Live metrics
@@ -160,11 +175,11 @@ Current:
 
 Planned for later phases:
 
-- Richer runner: request bodies, more HTTP methods, per-second buckets, think time (Phase 5)
 - Heartbeat/lease to remove the reclaim double-execution caveat (Phase 6)
 - A React dashboard for creating and viewing runs (Phase 7)
 - Authentication, quotas, and target allowlists (Phase 8)
 - Local Kubernetes with kind or minikube (Phase 9)
+- Optional runner breadth: status-code breakdown, per-second RPS buckets, assertions/thresholds, multi-step scenarios
 
 ## Documentation
 

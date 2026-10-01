@@ -1074,6 +1074,63 @@ label bounded or cardinality explodes; and expose raw facts, deriving rates and
 percentiles at query time so the query layer -- not your hot path -- does the math.
 ```
 
+## Phase 5: Better Runner Capabilities
+
+The runner grew from a GET-only engine into a realistic one. Three features, each
+threading through the full stack (create API -> Postgres -> shard assignment ->
+worker -> runner):
+
+Custom request shape (migration 003):
+
+```text
+Headers (jsonb) and a request body (text) on a run, so POST/PUT/PATCH tests send
+real payloads. The runner sets the headers on each request and sends a FRESH body
+reader per request -- a shared io.Reader is consumed after the first request, so
+every request builds its own strings.NewReader over the (immutable) body string.
+```
+
+Latency percentiles -- p50/p95/p99 (migrations 004):
+
+```text
+Averages lie about user experience: an avg smears outliers across everyone and no
+real request takes "the average". Percentiles answer the real question (typical vs
+tail). You cannot derive p99 from avg/min/max, and you cannot keep every latency
+(memory blows up), so each VU keeps a fixed, log-spaced HISTOGRAM (bounded memory,
+bucket-width accuracy -- the memory/accuracy tradeoff). mergeStats sums the per-VU
+bucket arrays; percentile() walks the cumulative counts (nearest-rank).
+
+Percentiles do NOT average across shards, so each shard reports its bucket COUNTS;
+the backend merges the shard histograms (element-wise add) and computes the run's
+percentiles from the combined distribution. Verified: a /random run showed avg
+154ms but p50 1ms / p95 1000ms -- the average hid a bimodal fast/slow split.
+```
+
+Think-time (migration 005):
+
+```text
+Each VU can pause between requests, turning the pure back-to-back CLOSED loop
+(hammer as fast as possible -- a stress test) into a realistic paced one (users who
+think between actions). The pause is interruptible -- select on ctx.Done() vs
+time.After -- so a long think-time never makes a run overrun its deadline; a plain
+time.Sleep would. Verified: 5 VUs/4s went from 66k requests (no think-time) to 40
+with a 500ms think-time -- load paced by think-time, not the target's speed.
+```
+
+Also fixed a latent completion-barrier race (not Phase-5-specific): two shards
+finishing at the same instant each saw the other still 'running' under READ
+COMMITTED and neither aggregated, hanging the run. Fixed by locking the parent run
+row (SELECT ... FOR UPDATE) before the barrier count, serializing it.
+
+```text
+Learning: request shape is per-request construction (separate from the concurrency
+of firing many); a histogram trades memory for accuracy and, crucially, MERGES
+exactly (which averaging percentiles cannot); think-time is the closed-loop vs
+open-loop load model; and a concurrent completion barrier needs serialization.
+```
+
+Deferred Phase 5 items (optional, not built): status-code breakdown, per-second
+RPS buckets, assertions/checks, multi-step scenarios.
+
 ## Current System State
 
 ```text
@@ -1081,13 +1138,14 @@ Whole platform runs in Docker Compose: postgres + redis + backend + N worker
 replicas + target + prometheus + grafana. Jobs are distributed via a Redis Streams
 consumer group (no polling), load-balanced across workers, with crash recovery
 (reclaim) and dead-lettering. A single run is fanned out into shards that run in
-parallel across workers and are re-aggregated on completion. Live metrics (RPS,
-error rate, latency percentiles, active VUs) are exposed to Prometheus and shown
-on a Grafana dashboard while runs execute. End-to-end lifecycle runs on its own
-with REAL load results.
+parallel across workers and are re-aggregated on completion (counts, weighted avg,
+and merged-histogram percentiles). The runner sends custom methods/headers/bodies
+with optional think-time. Live metrics (RPS, error rate, latency percentiles,
+active VUs) are exposed to Prometheus and shown on a Grafana dashboard while runs
+execute. End-to-end lifecycle runs on its own with REAL load results.
 ```
 
-Phases 1, 2, 3, and 4 are COMPLETE.
+Phases 1 through 5 are COMPLETE.
 
 Known follow-ups (not blocking):
 
@@ -1096,20 +1154,23 @@ Known follow-ups (not blocking):
   (Phase 6); otherwise a long in-flight job can be reclaimed and run twice.
 - Dual-write gap: if the INSERT succeeds but XADD fails, the run is queued with
   no message and won't be delivered (add an outbox pattern later).
-- Richer runner: headers/body, non-GET methods, per-second buckets, think-time,
-  scenarios, assertions (Phase 5). Latency percentiles now exist via the histogram.
+- Optional runner breadth: status-code breakdown, per-second RPS buckets,
+  assertions/thresholds, multi-step scenarios with data correlation.
+- The runner's latency bucket boundaries are duplicated in the backend
+  (store/histogram.go) and MUST stay in sync with worker/.../runner/histogram.go.
 ```
 
 ## Next Step
 
-Phase 5: better runner capabilities.
+Phase 6: failure handling (heartbeat/lease).
 
 ```text
-Evolve the runner from a basic GET engine into a more realistic one: HTTP methods
-beyond GET, headers and request bodies, status-code breakdown, per-second RPS
-buckets, multi-step scenarios, think time, and basic assertions/checks. Later
-phases add a heartbeat/lease to remove the reclaim double-execution caveat
-(Phase 6), a React dashboard (Phase 7), auth/quotas (Phase 8), and Kubernetes
-(Phase 9).
+Close the one real correctness gap in the distributed core: a worker should renew
+a lease/heartbeat while processing a long job, so reclaim fires only on genuine
+death -- removing the "reclaim timeout must exceed job duration or a running job
+gets double-executed" caveat from Phase 3. Also in scope: clearer test-run
+recovery states, retry rules, graceful shutdown/cancellation, and failure-event
+logging. Later: a React dashboard (Phase 7), auth/quotas/target allowlist
+(Phase 8), and Kubernetes (Phase 9).
 ```
 
