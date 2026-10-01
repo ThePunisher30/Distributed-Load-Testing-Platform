@@ -5,13 +5,15 @@ build a tool that sends HTTP requests, but to understand the system design behin
 distributed workers, orchestration, message queues, metrics, failure handling,
 and observability — by building each piece from scratch.
 
-The platform grows in phases. **Phases 1–5 are complete**: a full test-run
+The platform grows in phases. **Phases 1–6 are complete**: a full test-run
 lifecycle, distributed through a Redis Streams message broker, with worker crash
 recovery and dead-lettering, run across multiple worker replicas — including
 splitting a single run into shards that execute in parallel and are re-aggregated
 — with live Prometheus metrics and a Grafana dashboard showing what happens as a
 run executes. The runner sends custom methods, headers, and bodies with optional
-think-time, and reports latency percentiles (p50/p95/p99) merged across shards.
+think-time, and reports latency percentiles (p50/p95/p99) merged across shards. A
+heartbeat/lease keeps slow-but-alive workers from being reclaimed, and a running
+test can be cancelled.
 
 ```text
 create test run -> backend publishes a job -> worker consumes it ->
@@ -98,6 +100,12 @@ Read it back (use the id from the create response):
 curl http://localhost:8080/test-runs/1
 ```
 
+Cancel a running run (it stops early and finalizes to `cancelled`, keeping partial results):
+
+```bash
+curl -X POST http://localhost:8080/test-runs/1/cancel
+```
+
 Example result:
 
 ```json
@@ -175,7 +183,6 @@ Current:
 
 Planned for later phases:
 
-- Heartbeat/lease to remove the reclaim double-execution caveat (Phase 6)
 - A React dashboard for creating and viewing runs (Phase 7)
 - Authentication, quotas, and target allowlists (Phase 8)
 - Local Kubernetes with kind or minikube (Phase 9)

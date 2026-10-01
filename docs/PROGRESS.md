@@ -1131,46 +1131,92 @@ open-loop load model; and a concurrent completion barrier needs serialization.
 Deferred Phase 5 items (optional, not built): status-code breakdown, per-second
 RPS buckets, assertions/checks, multi-step scenarios.
 
+## Phase 6: Failure Handling
+
+Two pieces: a heartbeat/lease that removes the reclaim double-execution caveat,
+and user-initiated run cancellation. The rest of the roadmap's Phase 6 list
+(graceful shutdown, ctx cancellation, retries, dead-letter, recovery states) was
+already in place from earlier phases.
+
+Heartbeat / lease:
+
+```text
+A reclaimer cannot tell "slow but alive" from "dead" -- both look like an unacked
+message. Before, RECLAIM_MIN_IDLE had to exceed the longest job or a busy worker's
+still-running job got reclaimed and run twice. Now, while processing, a worker
+refreshes its claim every HEARTBEAT_INTERVAL (XCLAIM JUSTID resets the message's
+idle time WITHOUT bumping the delivery counter -- a plain XCLAIM would inflate it
+and falsely dead-letter). So a live worker's message never looks idle, and
+RECLAIM_MIN_IDLE only needs to exceed the heartbeat interval, not the job. A dead
+worker stops heartbeating and is reclaimed. heartbeat() is a goroutine (ticker +
+select{ctx.Done()/tick}) started before executeShard and stopped when it returns.
+Verified: a 20s job under a 10s reclaim threshold ran exactly ONCE; a worker
+killed mid-job was still reclaimed by a peer ~12s later.
+```
+
+User-initiated cancellation:
+
+```text
+POST /test-runs/{id}/cancel moves a queued/running run to 'cancelling'. The runner
+already stops on context cancellation (duration elapsed / worker shutdown), so
+cancellation is just a third reason to cancel that context. Each worker runs a
+watchCancel() goroutine that polls the run's status (client.RunStatus) alongside
+the heartbeat; on 'cancelling' it cancels runCtx -> the VUs stop early. Shards
+report their PARTIAL results, and the completion barrier (aggregateRun, which now
+reads the run status under its row lock) finalizes 'cancelling' -> 'cancelled',
+keeping the partials. Signal path: user -> backend (DB status) -> worker (poll) ->
+context cancel -> load stops. Verified: a 30s run cancelled ~5s in reached
+'cancelled' ~3s later with 53,785 partial requests preserved.
+```
+
+```text
+Learning: a lease is a time-bounded claim you RENEW to keep -- renewal is the
+proof of life, and it decouples failure detection from job duration. Distributed
+cancellation is the same background-goroutine pattern as the heartbeat, but it
+WATCHES for a stop signal instead of sending a keep-alive; routing it through the
+context the runner already respects means zero new stop logic in the hot path.
+```
+
 ## Current System State
 
 ```text
 Whole platform runs in Docker Compose: postgres + redis + backend + N worker
 replicas + target + prometheus + grafana. Jobs are distributed via a Redis Streams
 consumer group (no polling), load-balanced across workers, with crash recovery
-(reclaim) and dead-lettering. A single run is fanned out into shards that run in
-parallel across workers and are re-aggregated on completion (counts, weighted avg,
-and merged-histogram percentiles). The runner sends custom methods/headers/bodies
-with optional think-time. Live metrics (RPS, error rate, latency percentiles,
-active VUs) are exposed to Prometheus and shown on a Grafana dashboard while runs
-execute. End-to-end lifecycle runs on its own with REAL load results.
+(reclaim), a heartbeat/lease so slow workers are not falsely reclaimed, and
+dead-lettering. A single run is fanned out into shards that run in parallel across
+workers and are re-aggregated on completion (counts, weighted avg, and
+merged-histogram percentiles). The runner sends custom methods/headers/bodies with
+optional think-time. A running test can be cancelled by the user. Live metrics
+(RPS, error rate, latency percentiles, active VUs) are exposed to Prometheus and
+shown on a Grafana dashboard while runs execute. End-to-end lifecycle runs on its
+own with REAL load results.
 ```
 
-Phases 1 through 5 are COMPLETE.
+Phases 1 through 6 are COMPLETE.
 
 Known follow-ups (not blocking):
 
 ```text
-- Reclaim timeout must exceed job duration until a heartbeat/lease is added
-  (Phase 6); otherwise a long in-flight job can be reclaimed and run twice.
 - Dual-write gap: if the INSERT succeeds but XADD fails, the run is queued with
   no message and won't be delivered (add an outbox pattern later).
 - Optional runner breadth: status-code breakdown, per-second RPS buckets,
   assertions/thresholds, multi-step scenarios with data correlation.
 - The runner's latency bucket boundaries are duplicated in the backend
   (store/histogram.go) and MUST stay in sync with worker/.../runner/histogram.go.
+- Cancellation signalling is poll-based (every heartbeat interval); Redis pub/sub
+  would make it near-instant.
 ```
 
 ## Next Step
 
-Phase 6: failure handling (heartbeat/lease).
+Phase 7: dashboard.
 
 ```text
-Close the one real correctness gap in the distributed core: a worker should renew
-a lease/heartbeat while processing a long job, so reclaim fires only on genuine
-death -- removing the "reclaim timeout must exceed job duration or a running job
-gets double-executed" caveat from Phase 3. Also in scope: clearer test-run
-recovery states, retry rules, graceful shutdown/cancellation, and failure-event
-logging. Later: a React dashboard (Phase 7), auth/quotas/target allowlist
-(Phase 8), and Kubernetes (Phase 9).
+Build a web UI (React) for creating test runs and viewing results: a creation
+form, a run list, a run detail page with latency/RPS/error charts, and a worker
+status view -- an API-driven frontend over the existing backend. Then Phase 8
+(authentication, quotas, and a target allowlist -- the guardrails that make the
+platform safe to expose) and Phase 9 (local Kubernetes / autoscaling).
 ```
 
