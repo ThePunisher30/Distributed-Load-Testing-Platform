@@ -26,7 +26,7 @@ func TestMergeStats_Mix(t *testing.T) {
 		MaxLatencyMs:       30,
 	}
 
-	if got != want {
+	if !sameResultCounts(got, want) {
 		t.Errorf("mismatch:\n got  %+v\n want %+v", got, want)
 	}
 }
@@ -54,7 +54,7 @@ func TestMergeStats_ZeroSampleVU(t *testing.T) {
 		MaxLatencyMs:       5,
 	}
 
-	if got != want {
+	if !sameResultCounts(got, want) {
 		t.Errorf("mismatch:\n got  %+v\n want %+v", got, want)
 	}
 }
@@ -76,7 +76,20 @@ func TestMergeStats_AllFailures(t *testing.T) {
 		MaxLatencyMs:       0,
 	}
 
-	if got != want {
+	if !sameResultCounts(got, want) {
 		t.Errorf("mismatch:\n got  %+v\n want %+v", got, want)
 	}
+}
+
+// sameResultCounts compares the count/avg/min/max fields of a Result. It skips the
+// percentile and LatencyBuckets fields (a slice makes Result non-comparable with
+// ==, and those are covered by the histogram tests).
+func sameResultCounts(got, want Result) bool {
+	return got.TotalRequests == want.TotalRequests &&
+		got.SuccessfulRequests == want.SuccessfulRequests &&
+		got.FailedRequests == want.FailedRequests &&
+		got.LatencyCount == want.LatencyCount &&
+		got.AvgLatencyMs == want.AvgLatencyMs &&
+		got.MinLatencyMs == want.MinLatencyMs &&
+		got.MaxLatencyMs == want.MaxLatencyMs
 }

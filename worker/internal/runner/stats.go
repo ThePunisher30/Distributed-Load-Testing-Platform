@@ -11,6 +11,10 @@ type vuStats struct {
 	sumLatencyMs float64 // running total of latencies (used for the average)
 	minLatencyMs float64 // fastest sample seen so far
 	maxLatencyMs float64 // slowest sample seen so far
+	// buckets is this VU's latency histogram: buckets[i] counts samples that fell
+	// in bucket i (see latencyBoundariesMs). A fixed-size array needs no allocation
+	// and is zero-ready, keeping the per-VU hot path lock-free as before.
+	buckets [numLatencyBuckets]int64
 }
 
 // record folds a single request's outcome into this VU's tally.
@@ -28,6 +32,7 @@ func (s *vuStats) record(latencyMs float64, success bool, gotResponse bool) {
 	}
 	if gotResponse {
 		s.sumLatencyMs += latencyMs
+		s.buckets[bucketIndex(latencyMs)]++ // only real responses have a latency
 		// On the first sample (latencyCount == 0) min/max are still zero-valued,
 		// so seed them with this sample rather than comparing against 0.
 		if s.latencyCount == 0 || latencyMs < s.minLatencyMs {
@@ -50,7 +55,11 @@ func mergeStats(all []vuStats) Result {
 	var minMs float64
 	var maxMs float64
 	var avg float64
+	merged := make([]int64, numLatencyBuckets)
 	for _, vu := range all {
+		for i := range vu.buckets {
+			merged[i] += vu.buckets[i]
+		}
 		total += vu.total
 		successful += vu.success
 		failed += vu.failed
@@ -76,5 +85,9 @@ func mergeStats(all []vuStats) Result {
 		AvgLatencyMs:       avg,
 		MinLatencyMs:       minMs,
 		MaxLatencyMs:       maxMs,
+		P50LatencyMs:       percentile(merged, 0.50),
+		P95LatencyMs:       percentile(merged, 0.95),
+		P99LatencyMs:       percentile(merged, 0.99),
+		LatencyBuckets:     merged,
 	}
 }

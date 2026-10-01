@@ -42,6 +42,14 @@ type Result struct {
 	AvgLatencyMs float64
 	MinLatencyMs float64
 	MaxLatencyMs float64
+	// Percentiles computed from the latency histogram. Unlike avg/min/max these
+	// cannot be averaged across shards, so LatencyBuckets carries the raw bucket
+	// counts too: the backend merges those (element-wise add) and recomputes the
+	// run's percentiles from the combined histogram.
+	P50LatencyMs   float64
+	P95LatencyMs   float64
+	P99LatencyMs   float64
+	LatencyBuckets []int64
 }
 
 // Run executes the load test described by cfg and returns aggregated metrics.
