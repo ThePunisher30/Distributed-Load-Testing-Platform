@@ -149,6 +149,28 @@ func validateCreate(req *models.CreateTestRunRequest) string {
 	return ""
 }
 
+// ListTestRuns handles GET /test-runs. It returns recent runs, newest first, for
+// the dashboard's run list. An optional ?limit (default 50, max 200) caps the count.
+func (h *Handler) ListTestRuns(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	runs, err := h.TestRuns.List(r.Context(), limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list test runs")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, runs)
+}
+
 // GetTestRun handles GET /test-runs/{id}. It parses the id, looks the run up,
 // and returns it, or 404 if it does not exist.
 func (h *Handler) GetTestRun(w http.ResponseWriter, r *http.Request) {

@@ -156,6 +156,31 @@ func (s *TestRunStore) GetByID(ctx context.Context, id int64) (*models.TestRun, 
 	return tr, nil
 }
 
+// List returns the most recent runs, newest first, capped at limit. It backs the
+// dashboard's run list.
+func (s *TestRunStore) List(ctx context.Context, limit int) ([]*models.TestRun, error) {
+	query := `SELECT ` + testRunColumns + ` FROM test_runs ORDER BY created_at DESC, id DESC LIMIT $1`
+
+	rows, err := s.db.QueryContext(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list test runs: %w", err)
+	}
+	defer rows.Close()
+
+	runs := make([]*models.TestRun, 0, limit)
+	for rows.Next() {
+		tr, err := scanRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan test run: %w", err)
+		}
+		runs = append(runs, tr)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate test runs: %w", err)
+	}
+	return runs, nil
+}
+
 // ClaimNext atomically claims the oldest queued run for a worker: it flips the
 // row to "running", stamps started_at, and returns it. Returns ErrNoQueuedRuns
 // when the queue is empty.

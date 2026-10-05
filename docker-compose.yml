@@ -135,10 +135,21 @@ services:
       - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
       - grafana_data:/var/lib/grafana
     ports:
-      # The dashboard UI at http://localhost:3000.
+      # The Grafana UI at http://localhost:3000.
       - "3000:3000"
     depends_on:
       - prometheus
+
+  # Phase 7: the web dashboard (React SPA built by Vite, served by nginx, which
+  # also reverse-proxies /api -> backend so the browser talks to one origin).
+  frontend:
+    build: ./frontend
+    container_name: dltp-frontend
+    ports:
+      # The dashboard at http://localhost:3001.
+      - "3001:80"
+    depends_on:
+      - backend
 
 volumes:
   postgres_data:

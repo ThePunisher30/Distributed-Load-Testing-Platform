@@ -31,9 +31,10 @@ func New(db *sql.DB, publisher *queue.Publisher) *Handler {
 	}
 }
 
-// Routes wires up the URL paths this handler serves and returns a mux. Go 1.22+
-// ServeMux supports method + path patterns and {id} wildcards directly.
-func (h *Handler) Routes() *http.ServeMux {
+// Routes wires up the URL paths this handler serves. Go 1.22+ ServeMux supports
+// method + path patterns and {id} wildcards directly. The mux is wrapped in CORS
+// so the dashboard can call the API from a browser (see corsMiddleware).
+func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", h.Health)
 
@@ -42,8 +43,9 @@ func (h *Handler) Routes() *http.ServeMux {
 	// registered there too once we add them).
 	mux.Handle("GET /metrics", promhttp.Handler())
 
-	// Public API (used by end users).
+	// Public API (used by end users and the dashboard).
 	mux.HandleFunc("POST /test-runs", h.CreateTestRun)
+	mux.HandleFunc("GET /test-runs", h.ListTestRuns)
 	mux.HandleFunc("GET /test-runs/{id}", h.GetTestRun)
 	mux.HandleFunc("POST /test-runs/{id}/cancel", h.CancelTestRun)
 
@@ -62,7 +64,24 @@ func (h *Handler) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /internal/shards/{id}/complete", h.CompleteShard)
 	mux.HandleFunc("POST /internal/shards/{id}/fail", h.FailShard)
 
-	return mux
+	return corsMiddleware(mux)
+}
+
+// corsMiddleware adds permissive CORS headers so a browser dashboard (served from
+// a different origin in dev) can call the API, and answers preflight OPTIONS
+// requests. In production the dashboard is served same-origin via an nginx proxy,
+// so this is mainly a convenience for running the Vite dev server directly.
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Health reports whether the backend is up AND whether it can reach the
