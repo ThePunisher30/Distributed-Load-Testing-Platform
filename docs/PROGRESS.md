@@ -1177,23 +1177,55 @@ WATCHES for a stop signal instead of sending a keep-alive; routing it through th
 context the runner already respects means zero new stop logic in the hot path.
 ```
 
+## Phase 7: Dashboard
+
+A web UI (React + Vite) over the existing JSON API, so runs can be created and
+inspected in the browser instead of with curl.
+
+```text
+Backend: a GET /test-runs list endpoint (newest first, ?limit) and a CORS
+middleware; Routes() now returns an http.Handler wrapped in CORS.
+
+Frontend (frontend/, a Vite + React SPA with react-router + recharts): the Home
+page owns the runs data and polls GET /test-runs every 3s; summary tiles (total /
+running / completed / failed); a create form that POSTs a run and navigates to it;
+a run list; and a run detail page that polls GET /test-runs/{id} every 2s WHILE the
+run is non-terminal (then stops), can POST .../cancel, and charts latency
+percentiles (bar) and success/failed (donut). Dark theme, inline SVG icons.
+
+Serving: a multi-stage image (Node builds the SPA, nginx serves it) that also
+reverse-proxies /api -> backend, so the browser talks to one origin (no CORS in
+prod; the header is a dev backstop). New compose service "frontend" on :3001.
+```
+
+```text
+Learning: the dashboard is a pure API CLIENT -- no business logic, just fetch +
+render. "Live" is just polling (setInterval / self-re-arming setTimeout), the
+browser echo of the worker's poll loops; the detail page polls only until the run
+is terminal. One nginx origin reverse-proxying /api is the clean way to avoid CORS.
+```
+
+Deferred: a worker-status view (Grafana already shows live per-worker metrics, and
+there is a link to it in the header).
+
 ## Current System State
 
 ```text
 Whole platform runs in Docker Compose: postgres + redis + backend + N worker
-replicas + target + prometheus + grafana. Jobs are distributed via a Redis Streams
-consumer group (no polling), load-balanced across workers, with crash recovery
-(reclaim), a heartbeat/lease so slow workers are not falsely reclaimed, and
+replicas + target + prometheus + grafana + frontend. Jobs are distributed via a
+Redis Streams consumer group (no polling), load-balanced across workers, with crash
+recovery (reclaim), a heartbeat/lease so slow workers are not falsely reclaimed, and
 dead-lettering. A single run is fanned out into shards that run in parallel across
 workers and are re-aggregated on completion (counts, weighted avg, and
 merged-histogram percentiles). The runner sends custom methods/headers/bodies with
 optional think-time. A running test can be cancelled by the user. Live metrics
 (RPS, error rate, latency percentiles, active VUs) are exposed to Prometheus and
-shown on a Grafana dashboard while runs execute. End-to-end lifecycle runs on its
-own with REAL load results.
+shown on a Grafana dashboard while runs execute. A React dashboard (localhost:3001)
+drives create/list/detail/cancel over the API. End-to-end lifecycle runs on its own
+with REAL load results.
 ```
 
-Phases 1 through 6 are COMPLETE.
+Phases 1 through 7 are COMPLETE.
 
 Known follow-ups (not blocking):
 
@@ -1210,13 +1242,14 @@ Known follow-ups (not blocking):
 
 ## Next Step
 
-Phase 7: dashboard.
+Phase 8: safety and multi-user controls.
 
 ```text
-Build a web UI (React) for creating test runs and viewing results: a creation
-form, a run list, a run detail page with latency/RPS/error charts, and a worker
-status view -- an API-driven frontend over the existing backend. Then Phase 8
-(authentication, quotas, and a target allowlist -- the guardrails that make the
-platform safe to expose) and Phase 9 (local Kubernetes / autoscaling).
+Add the guardrails that make the platform safe to expose: a target allowlist (so
+it can't be pointed at arbitrary third parties -- the non-negotiable one),
+authentication and API keys, per-user/project scoping, and quotas (max VUs,
+duration, concurrent runs). Then Phase 9 (local Kubernetes / autoscaling the
+worker pool). Still deferred: the dual-write outbox, and optional runner breadth
+(status-code breakdown, per-second RPS buckets, assertions, multi-step scenarios).
 ```
 

@@ -5,15 +5,15 @@ build a tool that sends HTTP requests, but to understand the system design behin
 distributed workers, orchestration, message queues, metrics, failure handling,
 and observability — by building each piece from scratch.
 
-The platform grows in phases. **Phases 1–6 are complete**: a full test-run
+The platform grows in phases. **Phases 1–7 are complete**: a full test-run
 lifecycle, distributed through a Redis Streams message broker, with worker crash
 recovery and dead-lettering, run across multiple worker replicas — including
 splitting a single run into shards that execute in parallel and are re-aggregated
 — with live Prometheus metrics and a Grafana dashboard showing what happens as a
 run executes. The runner sends custom methods, headers, and bodies with optional
 think-time, and reports latency percentiles (p50/p95/p99) merged across shards. A
-heartbeat/lease keeps slow-but-alive workers from being reclaimed, and a running
-test can be cancelled.
+heartbeat/lease keeps slow-but-alive workers from being reclaimed, a running test
+can be cancelled, and a React dashboard drives the whole thing from the browser.
 
 ```text
 create test run -> backend publishes a job -> worker consumes it ->
@@ -33,6 +33,7 @@ PostgreSQL      source of truth for test-run config and results
 Redis           message broker (Streams) that distributes jobs to workers
 Prometheus      scrapes /metrics from backend + workers, stores time series
 Grafana         live dashboard (RPS, error rate, latency percentiles, active VUs)
+Frontend        React dashboard: create/list/inspect/cancel runs (nginx + /api proxy)
 ```
 
 The load runner is written from scratch (no k6, JMeter, Locust, or Gatling) on
@@ -140,9 +141,14 @@ While runs execute, the backend and every worker expose Prometheus metrics, and 
 Grafana dashboard shows them live:
 
 ```text
+Dashboard    http://localhost:3001   (create/list/inspect/cancel runs)
 Grafana      http://localhost:3000   (anonymous viewing on; "Load Testing Platform")
 Prometheus   http://localhost:9090   (targets, and a PromQL query box)
 ```
+
+The **dashboard** at http://localhost:3001 is the main UI: a form to launch runs,
+a live-updating run list, and a per-run detail page with latency/outcome charts
+and a cancel button. (It polls the API; Grafana covers live fleet-wide metrics.)
 
 Metrics the runner emits (bounded labels only; per-run detail stays in Postgres):
 
@@ -179,11 +185,11 @@ Current:
 - PostgreSQL — persistent storage and source of truth
 - Redis Streams — job-distribution message broker (consumer groups, reclaim, dead-letter)
 - Prometheus + Grafana — pull-based metrics and live dashboards
+- React + Vite + Recharts — the web dashboard (served by nginx, which proxies /api)
 - Docker Compose — local infrastructure, one-command startup; scale workers with `--scale worker=N` (they share the consumer group)
 
 Planned for later phases:
 
-- A React dashboard for creating and viewing runs (Phase 7)
 - Authentication, quotas, and target allowlists (Phase 8)
 - Local Kubernetes with kind or minikube (Phase 9)
 - Optional runner breadth: status-code breakdown, per-second RPS buckets, assertions/thresholds, multi-step scenarios
