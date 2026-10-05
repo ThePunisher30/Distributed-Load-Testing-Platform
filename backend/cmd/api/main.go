@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,6 +27,13 @@ func main() {
 	dsn := getenv("DATABASE_URL", "postgres://dltp:dltp@localhost:5432/dltp?sslmode=disable")
 	addr := getenv("BACKEND_ADDR", ":8080")
 	redisAddr := getenv("REDIS_ADDR", "localhost:6379")
+	// Phase 8 safety: runs may only target these hosts (deny by default). The
+	// default permits the bundled target service and local addresses; set
+	// ALLOWED_TARGET_HOSTS (comma-separated) to opt more in.
+	allowedHosts := parseHostSet(getenv("ALLOWED_TARGET_HOSTS", "target,localhost,127.0.0.1"))
+	// Phase 8 safety: cap how many runs may be active (queued/running/cancelling)
+	// at once, so the platform can't be swamped with unbounded concurrent load.
+	maxConcurrent := getint("MAX_CONCURRENT_RUNS", 10)
 
 	// A root context we cancel on shutdown so in-flight work can wind down.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -44,7 +53,7 @@ func main() {
 	defer rdb.Close()
 	log.Println("connected to redis")
 
-	h := handlers.New(pool, queue.NewPublisher(rdb))
+	h := handlers.New(pool, queue.NewPublisher(rdb), allowedHosts, maxConcurrent)
 
 	server := &http.Server{
 		Addr:         addr,
@@ -78,6 +87,29 @@ func main() {
 		log.Printf("graceful shutdown failed: %v", err)
 	}
 	log.Println("backend stopped")
+}
+
+// getint parses an integer env var, falling back on unset/invalid.
+func getint(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+		log.Printf("invalid %s=%q, using default %d", key, v, fallback)
+	}
+	return fallback
+}
+
+// parseHostSet turns a comma-separated host list into a lookup set (lowercased,
+// trimmed, empties dropped).
+func parseHostSet(csv string) map[string]bool {
+	set := make(map[string]bool)
+	for _, h := range strings.Split(csv, ",") {
+		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
+			set[h] = true
+		}
+	}
+	return set
 }
 
 // getenv returns the environment variable named key, or fallback if it is unset

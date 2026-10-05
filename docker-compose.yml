@@ -37,6 +37,10 @@ services:
       DATABASE_URL: postgres://dltp:dltp@postgres:5432/dltp?sslmode=disable
       BACKEND_ADDR: ":8080"
       REDIS_ADDR: redis:6379
+      # Phase 8 safety: a run may only target these hosts (deny by default).
+      ALLOWED_TARGET_HOSTS: "target,localhost,127.0.0.1"
+      # Cap simultaneous active (queued/running/cancelling) runs; 0 = unlimited.
+      MAX_CONCURRENT_RUNS: "10"
     ports:
       # Exposed so you can POST test runs from the host.
       - "8080:8080"

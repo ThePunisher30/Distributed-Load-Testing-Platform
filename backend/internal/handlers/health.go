@@ -14,20 +14,29 @@ import (
 )
 
 // Handler carries the dependencies our HTTP handlers need: the database pool
-// (for the health ping), the stores that own each table's queries, and the
-// queue publisher for enqueuing jobs.
+// (for the health ping), the stores that own each table's queries, the queue
+// publisher for enqueuing jobs, and the target allowlist (the set of hosts a run
+// is permitted to send load at).
 type Handler struct {
-	DB        *sql.DB
-	TestRuns  *store.TestRunStore
-	Publisher *queue.Publisher
+	DB                 *sql.DB
+	TestRuns           *store.TestRunStore
+	Publisher          *queue.Publisher
+	AllowedTargetHosts map[string]bool
+	// MaxConcurrentRuns caps how many runs may be active (non-terminal) at once;
+	// 0 means no limit.
+	MaxConcurrentRuns int
 }
 
-// New builds a Handler with its dependencies.
-func New(db *sql.DB, publisher *queue.Publisher) *Handler {
+// New builds a Handler with its dependencies. allowedHosts is the set of hostnames
+// a test run may target (deny by default); maxConcurrent caps simultaneous active
+// runs (0 = unlimited).
+func New(db *sql.DB, publisher *queue.Publisher, allowedHosts map[string]bool, maxConcurrent int) *Handler {
 	return &Handler{
-		DB:        db,
-		TestRuns:  store.NewTestRunStore(db),
-		Publisher: publisher,
+		DB:                 db,
+		TestRuns:           store.NewTestRunStore(db),
+		Publisher:          publisher,
+		AllowedTargetHosts: allowedHosts,
+		MaxConcurrentRuns:  maxConcurrent,
 	}
 }
 

@@ -1,15 +1,15 @@
 package handlers
 
 import (
+	"distributed-load-testing-platform/backend/internal/models"
+	"distributed-load-testing-platform/backend/internal/store"
 	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
-
-	"distributed-load-testing-platform/backend/internal/models"
-	"distributed-load-testing-platform/backend/internal/store"
 )
 
 // allowedMethods is the set of HTTP methods a test run may use against a target.
@@ -50,6 +50,25 @@ func (h *Handler) CreateTestRun(w http.ResponseWriter, r *http.Request) {
 	if msg := validateCreate(&req); msg != "" {
 		writeError(w, http.StatusBadRequest, msg)
 		return
+	}
+
+	if !h.targetAllowed(req.TargetURL) {
+		writeError(w, http.StatusForbidden, "target host is not allowed")
+		return
+	}
+
+	// Admission control: refuse new runs when the platform is already at its
+	// concurrent-run cap (best-effort; see CountActiveRuns).
+	if h.MaxConcurrentRuns > 0 {
+		active, err := h.TestRuns.CountActiveRuns(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not check run capacity")
+			return
+		}
+		if active >= h.MaxConcurrentRuns {
+			writeError(w, http.StatusTooManyRequests, "too many runs in progress; try again once some finish")
+			return
+		}
 	}
 
 	// Fan the run out into shards (>= 1) and insert run + shards atomically.
@@ -217,4 +236,14 @@ func (h *Handler) CancelTestRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, tr)
+}
+
+func (h *Handler) targetAllowed(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return h.AllowedTargetHosts[host]
+
 }

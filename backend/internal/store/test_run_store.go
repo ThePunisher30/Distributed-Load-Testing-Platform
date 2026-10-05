@@ -623,3 +623,17 @@ func (s *TestRunStore) FailShard(ctx context.Context, shardID int64, reason stri
 	}
 	return err // nil miss -> already-terminal shard is a no-op success
 }
+
+// CountActiveRuns returns how many runs are currently non-terminal
+// (queued / running / cancelling) — used to enforce the concurrency cap.
+func (s *TestRunStore) CountActiveRuns(ctx context.Context) (int, error) {
+	var count int
+	const q = `
+		SELECT COUNT(*) FROM test_runs
+		WHERE status IN ('queued', 'running', 'cancelling')`
+	err := s.db.QueryRowContext(ctx, q).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count active runs: %w", err)
+	}
+	return count, nil
+}
