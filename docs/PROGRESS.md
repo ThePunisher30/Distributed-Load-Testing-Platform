@@ -1208,6 +1208,44 @@ is terminal. One nginx origin reverse-proxying /api is the clean way to avoid CO
 Deferred: a worker-status view (Grafana already shows live per-worker metrics, and
 there is a link to it in the header).
 
+## Phase 8: Safety and Multi-User Controls
+
+Two safety controls so the platform can't be misused (the roadmap's auth / projects
+/ RBAC / audit-log items are deliberately deferred -- see follow-ups).
+
+Target allowlist (deny by default):
+
+```text
+An open load tester is a weapon: it would send N workers x V virtual users of
+traffic at ANY URL a caller supplies -- DDoS-for-hire, and SSRF (workers sit inside
+the network, so they could hit internal / cloud-metadata addresses an outsider
+can't). The fix is an allowlist, not a blocklist: you can't enumerate every bad
+host, but you can enumerate the few permitted ones, and deny everything else.
+CreateTestRun parses the target URL, takes its host (url.Hostname(), port stripped,
+lowercased), and rejects anything not in ALLOWED_TARGET_HOSTS (default
+target,localhost,127.0.0.1) with 403. Unparseable URLs fail CLOSED (denied).
+Verified: example.com and 169.254.169.254 -> 403; target -> 201.
+```
+
+Concurrent-run cap (admission control):
+
+```text
+Per-run caps (VUs/duration/shards) bound one run's size; this bounds how many runs
+are in flight at once, so the worker pool / DB / target can't be swamped. At
+admission (create time), CountActiveRuns counts non-terminal runs
+(queued/running/cancelling) and CreateTestRun refuses new ones with 429 Too Many
+Requests once MAX_CONCURRENT_RUNS (default 10) are active. Best-effort: a
+check-then-create race exists; a hard guarantee would count inside the insert tx.
+Verified: with the cap reached, further runs got 429.
+```
+
+```text
+Learning: secure by default (deny-all, opt in); allowlist vs blocklist; fail
+closed; SSRF; admission control / backpressure (reject new work at capacity, with
+429); the TOCTOU check-then-act race and why a hard limit needs the check in the
+write transaction.
+```
+
 ## Current System State
 
 ```text
@@ -1218,18 +1256,25 @@ recovery (reclaim), a heartbeat/lease so slow workers are not falsely reclaimed,
 dead-lettering. A single run is fanned out into shards that run in parallel across
 workers and are re-aggregated on completion (counts, weighted avg, and
 merged-histogram percentiles). The runner sends custom methods/headers/bodies with
-optional think-time. A running test can be cancelled by the user. Live metrics
-(RPS, error rate, latency percentiles, active VUs) are exposed to Prometheus and
-shown on a Grafana dashboard while runs execute. A React dashboard (localhost:3001)
-drives create/list/detail/cancel over the API. End-to-end lifecycle runs on its own
-with REAL load results.
+optional think-time. A running test can be cancelled by the user. Runs may only
+target allowlisted hosts, and a concurrent-run cap bounds in-flight load. Live
+metrics (RPS, error rate, latency percentiles, active VUs) are exposed to Prometheus
+and shown on a Grafana dashboard while runs execute. A React dashboard
+(localhost:3001) drives create/list/detail/cancel over the API. End-to-end lifecycle
+runs on its own with REAL load results.
 ```
 
-Phases 1 through 7 are COMPLETE.
+Phases 1 through 8 are COMPLETE (Phase 8 = the safety controls; multi-user/auth
+deferred).
 
 Known follow-ups (not blocking):
 
 ```text
+- Multi-user layer deferred from Phase 8: authentication / API keys, projects or
+  workspaces, role-based access, and audit logs (the allowlist + concurrency cap
+  are in; these are the hosted-product pieces).
+- The concurrent-run cap is best-effort (check-then-create race); a hard guarantee
+  would count active runs inside the insert transaction.
 - Dual-write gap: if the INSERT succeeds but XADD fails, the run is queued with
   no message and won't be delivered (add an outbox pattern later).
 - Optional runner breadth: status-code breakdown, per-second RPS buckets,
@@ -1242,14 +1287,13 @@ Known follow-ups (not blocking):
 
 ## Next Step
 
-Phase 8: safety and multi-user controls.
+Phase 9: local orchestration and deployment.
 
 ```text
-Add the guardrails that make the platform safe to expose: a target allowlist (so
-it can't be pointed at arbitrary third parties -- the non-negotiable one),
-authentication and API keys, per-user/project scoping, and quotas (max VUs,
-duration, concurrent runs). Then Phase 9 (local Kubernetes / autoscaling the
-worker pool). Still deferred: the dual-write outbox, and optional runner breadth
-(status-code breakdown, per-second RPS buckets, assertions, multi-step scenarios).
+Deploy the platform like real infrastructure: local Kubernetes (kind or minikube)
+with Deployments/Services for each component, health/readiness probes, service
+discovery, and -- the interesting part -- autoscaling the worker pool (HPA) so
+replicas scale with load. Plus a basic CI pipeline. This is the final roadmap
+phase. (Multi-user auth and the other deferred items above can follow after.)
 ```
 

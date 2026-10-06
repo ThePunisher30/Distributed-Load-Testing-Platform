@@ -5,7 +5,7 @@ build a tool that sends HTTP requests, but to understand the system design behin
 distributed workers, orchestration, message queues, metrics, failure handling,
 and observability — by building each piece from scratch.
 
-The platform grows in phases. **Phases 1–7 are complete**: a full test-run
+The platform grows in phases. **Phases 1–8 are complete**: a full test-run
 lifecycle, distributed through a Redis Streams message broker, with worker crash
 recovery and dead-lettering, run across multiple worker replicas — including
 splitting a single run into shards that execute in parallel and are re-aggregated
@@ -13,7 +13,9 @@ splitting a single run into shards that execute in parallel and are re-aggregate
 run executes. The runner sends custom methods, headers, and bodies with optional
 think-time, and reports latency percentiles (p50/p95/p99) merged across shards. A
 heartbeat/lease keeps slow-but-alive workers from being reclaimed, a running test
-can be cancelled, and a React dashboard drives the whole thing from the browser.
+can be cancelled, a React dashboard drives the whole thing from the browser, and
+safety controls (a target allowlist + a concurrent-run cap) keep it from being
+misused.
 
 ```text
 create test run -> backend publishes a job -> worker consumes it ->
@@ -162,6 +164,15 @@ Rates and percentiles are derived at query time in PromQL, e.g. fleet RPS is
 `sum(rate(loadtest_requests_total[30s]))` and p95 latency is
 `histogram_quantile(0.95, sum by (le) (rate(loadtest_request_duration_seconds_bucket[1m])))`.
 
+## Safety
+
+The platform refuses to be a weapon. A run may only target hosts on an
+**allowlist** (`ALLOWED_TARGET_HOSTS`, default `target,localhost,127.0.0.1`) — any
+other host is rejected with `403`, which blocks both DDoS-for-hire and SSRF to
+internal addresses. To load-test your own service, add its host to that env var.
+A **concurrent-run cap** (`MAX_CONCURRENT_RUNS`, default 10) returns `429` once
+that many runs are active, so the platform can't be swamped.
+
 ## Tests
 
 ```bash
@@ -190,8 +201,8 @@ Current:
 
 Planned for later phases:
 
-- Authentication, quotas, and target allowlists (Phase 8)
-- Local Kubernetes with kind or minikube (Phase 9)
+- Local Kubernetes with kind or minikube, autoscaling the worker pool (Phase 9)
+- Multi-user layer (deferred from Phase 8): authentication / API keys, projects, RBAC, audit logs
 - Optional runner breadth: status-code breakdown, per-second RPS buckets, assertions/thresholds, multi-step scenarios
 
 ## Documentation
