@@ -1,0 +1,65 @@
+# Postgres: durable storage via a PersistentVolumeClaim (the k8s version of a
+# named volume), the schema bootstrapped from the migrations ConfigMap mounted
+# into /docker-entrypoint-initdb.d (runs once on an empty data dir), and a
+# ClusterIP Service so other pods reach it as "postgres".
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: dltp
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: dltp
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: postgres }
+  template:
+    metadata:
+      labels: { app: postgres }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          envFrom:
+            - secretRef: { name: dltp-secrets }
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: migrations
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "dltp", "-d", "dltp"] }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec: { command: ["pg_isready", "-U", "dltp", "-d", "dltp"] }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: postgres-data }
+        - name: migrations
+          configMap: { name: dltp-migrations }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: dltp
+spec:
+  selector: { app: postgres }
+  ports:
+    - port: 5432
+      targetPort: 5432

@@ -1,0 +1,79 @@
+# The worker pool -- the part that autoscales.
+#
+# Workers receive no inbound traffic (they PULL jobs from the Redis stream), so
+# there's no routing Service; instead there's a headless Service purely so metrics
+# scrapers can discover every pod. Each pod's hostname is unique (the pod name),
+# which is exactly what the consumer-group code already uses as its consumer name,
+# so adding/removing pods just rebalances the group -- no code change. That design
+# (Phase 3) is what makes autoscaling free here.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: dltp
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: worker }
+  template:
+    metadata:
+      labels: { app: worker }
+    spec:
+      containers:
+        - name: worker
+          image: distributedloadtestingplatform-worker:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef: { name: dltp-config }
+          ports:
+            - containerPort: 9100 # /metrics
+          # A CPU request is REQUIRED for the HPA: it scales on CPU usage measured
+          # as a percentage of this request. Generating load is CPU-heavy, so a
+          # busy worker's usage climbs past the target and triggers scale-up.
+          resources:
+            requests:
+              cpu: "100m"
+            limits:
+              cpu: "500m"
+          readinessProbe:
+            httpGet: { path: /metrics, port: 9100 }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+---
+# Headless Service (clusterIP: None) -> DNS returns every worker pod IP, which a
+# Prometheus running in-cluster could use to scrape all of them.
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker
+  namespace: dltp
+spec:
+  clusterIP: None
+  selector: { app: worker }
+  ports:
+    - port: 9100
+      targetPort: 9100
+---
+# Horizontal Pod Autoscaler: keep worker CPU near 60% of its request by moving the
+# replica count between 2 and 8. When a big load test drives the workers hard, k8s
+# adds pods; when it finishes, it scales back down. (Needs metrics-server in the
+# cluster.)
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: worker
+  namespace: dltp
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60

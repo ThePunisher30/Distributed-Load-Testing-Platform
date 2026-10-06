@@ -1,0 +1,37 @@
+# The safe local target to send load at. Uses the locally-built image
+# (imagePullPolicy IfNotPresent so k8s uses the Docker Desktop image store rather
+# than pulling from a registry).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: target
+  namespace: dltp
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: target }
+  template:
+    metadata:
+      labels: { app: target }
+    spec:
+      containers:
+        - name: target
+          image: distributedloadtestingplatform-target:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8081
+          readinessProbe:
+            httpGet: { path: /health, port: 8081 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: target
+  namespace: dltp
+spec:
+  selector: { app: target }
+  ports:
+    - port: 8081
+      targetPort: 8081

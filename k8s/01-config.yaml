@@ -1,0 +1,33 @@
+# Non-secret configuration shared by the services. In Compose these were inline
+# `environment:` values; in k8s they live in a ConfigMap (and the password in a
+# Secret) so config is separate from the images. Services reach each other by
+# Service name on the cluster's DNS (postgres, redis, backend, target), exactly
+# like the Compose network.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dltp-config
+  namespace: dltp
+data:
+  DATABASE_URL: "postgres://dltp:dltp@postgres:5432/dltp?sslmode=disable"
+  BACKEND_ADDR: ":8080"
+  BACKEND_URL: "http://backend:8080"
+  REDIS_ADDR: "redis:6379"
+  ALLOWED_TARGET_HOSTS: "target,localhost,127.0.0.1"
+  MAX_CONCURRENT_RUNS: "10"
+  RECLAIM_MIN_IDLE: "10s"
+  HEARTBEAT_INTERVAL: "2s"
+  MAX_DELIVERIES: "3"
+---
+# Postgres credentials. Real clusters would use a proper secret manager; this is a
+# plain Secret for local dev (the values match DATABASE_URL above).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dltp-secrets
+  namespace: dltp
+type: Opaque
+stringData:
+  POSTGRES_USER: "dltp"
+  POSTGRES_PASSWORD: "dltp"
+  POSTGRES_DB: "dltp"

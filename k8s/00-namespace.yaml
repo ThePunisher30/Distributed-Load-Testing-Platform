@@ -1,0 +1,5 @@
+# Everything lives in one namespace so it's easy to see and tear down together.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dltp

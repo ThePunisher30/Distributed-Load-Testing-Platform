@@ -1,0 +1,96 @@
+# In-cluster observability: Prometheus + Grafana, deployed into the cluster so the
+# k8s dashboards see the k8s workload (the Compose Grafana only sees Compose).
+#
+# The config/provisioning come from the SAME files as the Compose stack, loaded as
+# ConfigMaps (see k8s/README.md) -- they work unchanged because everything is
+# addressed by Service name: Prometheus scrapes "backend:8080" and discovers the
+# "worker" headless Service's pods, and Grafana's datasource points at
+# "http://prometheus:9090".
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: dltp
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: prometheus }
+  template:
+    metadata:
+      labels: { app: prometheus }
+    spec:
+      containers:
+        - name: prometheus
+          image: prom/prometheus:latest
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus/prometheus.yml
+              subPath: prometheus.yml
+      volumes:
+        - name: config
+          configMap: { name: prometheus-config }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: dltp
+spec:
+  selector: { app: prometheus }
+  ports:
+    - port: 9090
+      targetPort: 9090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: dltp
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: grafana }
+  template:
+    metadata:
+      labels: { app: grafana }
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:latest
+          ports:
+            - containerPort: 3000
+          env:
+            - { name: GF_SECURITY_ADMIN_USER, value: "admin" }
+            - { name: GF_SECURITY_ADMIN_PASSWORD, value: "admin" }
+            - { name: GF_AUTH_ANONYMOUS_ENABLED, value: "true" }
+            - { name: GF_AUTH_ANONYMOUS_ORG_ROLE, value: "Viewer" }
+          volumeMounts:
+            - name: datasource
+              mountPath: /etc/grafana/provisioning/datasources
+              readOnly: true
+            - name: dashboards-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+              readOnly: true
+            - name: dashboard-json
+              mountPath: /etc/grafana/dashboards
+              readOnly: true
+      volumes:
+        - name: datasource
+          configMap: { name: grafana-datasource }
+        - name: dashboards-provider
+          configMap: { name: grafana-dashboards-provider }
+        - name: dashboard-json
+          configMap: { name: grafana-dashboard-json }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: dltp
+spec:
+  selector: { app: grafana }
+  ports:
+    - port: 3000
+      targetPort: 3000

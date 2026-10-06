@@ -1,0 +1,43 @@
+# Backend control plane. Config comes from the ConfigMap + Secret; k8s probes the
+# /health endpoint (which pings the DB) for both liveness and readiness, so the
+# Service only sends traffic once the DB is reachable.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: dltp
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: backend }
+  template:
+    metadata:
+      labels: { app: backend }
+    spec:
+      containers:
+        - name: backend
+          image: distributedloadtestingplatform-backend:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef: { name: dltp-config }
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: dltp
+spec:
+  selector: { app: backend }
+  ports:
+    - port: 8080
+      targetPort: 8080

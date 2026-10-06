@@ -1,0 +1,38 @@
+# The dashboard. Its nginx reverse-proxies /api -> http://backend:8080, and
+# "backend" resolves to the backend Service here just as it did on the Compose
+# network, so the image works unchanged. ClusterIP + `kubectl port-forward` for
+# local access (keeps us off host-port juggling).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: dltp
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: frontend }
+  template:
+    metadata:
+      labels: { app: frontend }
+    spec:
+      containers:
+        - name: frontend
+          image: distributedloadtestingplatform-frontend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet: { path: /, port: 80 }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: dltp
+spec:
+  selector: { app: frontend }
+  ports:
+    - port: 80
+      targetPort: 80
