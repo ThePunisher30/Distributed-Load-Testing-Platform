@@ -5,17 +5,18 @@ build a tool that sends HTTP requests, but to understand the system design behin
 distributed workers, orchestration, message queues, metrics, failure handling,
 and observability — by building each piece from scratch.
 
-The platform grows in phases. **Phases 1–8 are complete**: a full test-run
-lifecycle, distributed through a Redis Streams message broker, with worker crash
-recovery and dead-lettering, run across multiple worker replicas — including
-splitting a single run into shards that execute in parallel and are re-aggregated
-— with live Prometheus metrics and a Grafana dashboard showing what happens as a
-run executes. The runner sends custom methods, headers, and bodies with optional
-think-time, and reports latency percentiles (p50/p95/p99) merged across shards. A
-heartbeat/lease keeps slow-but-alive workers from being reclaimed, a running test
-can be cancelled, a React dashboard drives the whole thing from the browser, and
-safety controls (a target allowlist + a concurrent-run cap) keep it from being
-misused.
+**All 9 roadmap phases are complete.** A full test-run lifecycle, distributed
+through a Redis Streams message broker, with worker crash recovery and
+dead-lettering, run across multiple worker replicas — including splitting a single
+run into shards that execute in parallel and are re-aggregated — with live
+Prometheus metrics and a Grafana dashboard showing what happens as a run executes.
+The runner sends custom methods, headers, and bodies with optional think-time, and
+reports latency percentiles (p50/p95/p99) merged across shards. A heartbeat/lease
+keeps slow-but-alive workers from being reclaimed, a running test can be cancelled,
+a React dashboard drives it from the browser, and safety controls (a target
+allowlist + a concurrent-run cap) keep it from being misused. It runs on Docker
+Compose for dev and on **Kubernetes** (with an autoscaling worker pool) as
+real-infra, and ships with a CI pipeline.
 
 ```text
 create test run -> backend publishes a job -> worker consumes it ->
@@ -173,6 +174,20 @@ internal addresses. To load-test your own service, add its host to that env var.
 A **concurrent-run cap** (`MAX_CONCURRENT_RUNS`, default 10) returns `429` once
 that many runs are active, so the platform can't be swamped.
 
+## Kubernetes
+
+The same images also deploy to a local Kubernetes cluster (Docker Desktop's
+built-in Kubernetes, kind, or minikube), with each component as a Deployment +
+Service and the **worker pool autoscaling** via an HPA. See
+[k8s/README.md](k8s/README.md) for the apply steps and the autoscaling demo.
+
+```bash
+kubectl apply -f k8s/00-namespace.yaml
+kubectl -n dltp create configmap dltp-migrations --from-file=migrations/
+kubectl apply -f k8s/
+kubectl -n dltp get hpa,pods -w   # watch the worker pool scale under load
+```
+
 ## Tests
 
 ```bash
@@ -198,12 +213,14 @@ Current:
 - Prometheus + Grafana — pull-based metrics and live dashboards
 - React + Vite + Recharts — the web dashboard (served by nginx, which proxies /api)
 - Docker Compose — local infrastructure, one-command startup; scale workers with `--scale worker=N` (they share the consumer group)
+- Kubernetes — real-infra deployment with an autoscaling worker pool (HPA); GitHub Actions for CI
 
-Planned for later phases:
+Optional future work (the roadmap's 9 phases are complete):
 
-- Local Kubernetes with kind or minikube, autoscaling the worker pool (Phase 9)
-- Multi-user layer (deferred from Phase 8): authentication / API keys, projects, RBAC, audit logs
-- Optional runner breadth: status-code breakdown, per-second RPS buckets, assertions/thresholds, multi-step scenarios
+- Multi-user layer (scoped out of Phase 8): authentication / API keys, projects, RBAC, audit logs
+- Reliability: an outbox to close the insert-then-publish dual-write gap
+- Runner breadth: status-code breakdown, per-second RPS buckets, assertions/thresholds, multi-step scenarios
+- Long-term ideas: multi-region workers, distributed tracing, open-loop (arrival-rate) mode, gRPC/WebSocket targets
 
 ## Documentation
 

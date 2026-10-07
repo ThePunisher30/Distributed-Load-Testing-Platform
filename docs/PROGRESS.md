@@ -1246,26 +1246,65 @@ closed; SSRF; admission control / backpressure (reject new work at capacity, wit
 write transaction.
 ```
 
+## Phase 9: Local Orchestration and Deployment
+
+The whole platform now also deploys to Kubernetes (k8s/), not just Docker Compose,
+with the worker pool autoscaling under load. Plus a CI pipeline.
+
+```text
+Each Compose service becomes a Deployment + Service; config moves to a
+ConfigMap/Secret; Postgres is backed by a PVC with the schema bootstrapped from a
+migrations ConfigMap; liveness/readiness probes gate traffic; and everything is
+addressed by Service name over cluster DNS -- so the SAME images run unchanged
+(the backend even self-heals, restarting until Postgres is ready, since k8s has no
+depends_on). Observability (Prometheus + Grafana) runs in-cluster too, reusing the
+Compose monitoring configs verbatim because they were already written in terms of
+Service names; Prometheus discovers the workers via a headless Service.
+```
+
+Worker autoscaling (the standout):
+
+```text
+A HorizontalPodAutoscaler keeps worker CPU near 60% by moving replicas between 2
+and 8. Under a load burst the pool scaled 2 -> 8 live; when load drops it scales
+back after the HPA's stabilization window. Crucially this needed ZERO worker code
+change: new pods just join the Redis consumer group and pull queued shards,
+because the Phase 3 "any worker can take any job" design already made workers
+fungible. The ops/scaling layer was trivial precisely because the distributed-
+systems groundwork was right. (HPA needs metrics-server; see k8s/README.md.)
+
+CI (.github/workflows/ci.yml): builds, vets, and tests all three Go modules on
+push/PR, with a throwaway Postgres service so the store tests actually run.
+```
+
+```text
+Learning: declarative desired-state + self-healing; Services/DNS as the k8s form of
+service discovery; liveness vs readiness probes; PVCs; config as ConfigMap/Secret;
+and horizontal autoscaling -- plus the capstone insight that good distributed
+design upstream makes the deployment/scaling layer almost free.
+```
+
 ## Current System State
 
 ```text
-Whole platform runs in Docker Compose: postgres + redis + backend + N worker
-replicas + target + prometheus + grafana + frontend. Jobs are distributed via a
-Redis Streams consumer group (no polling), load-balanced across workers, with crash
-recovery (reclaim), a heartbeat/lease so slow workers are not falsely reclaimed, and
-dead-lettering. A single run is fanned out into shards that run in parallel across
-workers and are re-aggregated on completion (counts, weighted avg, and
-merged-histogram percentiles). The runner sends custom methods/headers/bodies with
-optional think-time. A running test can be cancelled by the user. Runs may only
-target allowlisted hosts, and a concurrent-run cap bounds in-flight load. Live
-metrics (RPS, error rate, latency percentiles, active VUs) are exposed to Prometheus
-and shown on a Grafana dashboard while runs execute. A React dashboard
-(localhost:3001) drives create/list/detail/cancel over the API. End-to-end lifecycle
-runs on its own with REAL load results.
+The platform runs two ways: Docker Compose (one command, dev) and Kubernetes
+(k8s/, real-infra). Components: postgres + redis + backend + N workers + target +
+prometheus + grafana + frontend. Jobs are distributed via a Redis Streams consumer
+group (no polling), load-balanced across workers, with crash recovery (reclaim), a
+heartbeat/lease so slow workers are not falsely reclaimed, and dead-lettering. A
+single run is fanned out into shards that run in parallel across workers and are
+re-aggregated on completion (counts, weighted avg, and merged-histogram
+percentiles). The runner sends custom methods/headers/bodies with optional
+think-time. A running test can be cancelled. Runs may only target allowlisted hosts,
+and a concurrent-run cap bounds in-flight load. Live metrics (RPS, error rate,
+latency percentiles, active VUs) are scraped by Prometheus and shown on a Grafana
+dashboard; a React dashboard drives create/list/detail/cancel over the API. On
+Kubernetes the worker pool autoscales 2..8 via an HPA. End-to-end lifecycle runs on
+its own with REAL load results.
 ```
 
-Phases 1 through 8 are COMPLETE (Phase 8 = the safety controls; multi-user/auth
-deferred).
+All 9 roadmap phases are COMPLETE. (Phase 8's multi-user/auth layer was scoped out;
+see follow-ups.)
 
 Known follow-ups (not blocking):
 
@@ -1287,13 +1326,20 @@ Known follow-ups (not blocking):
 
 ## Next Step
 
-Phase 9: local orchestration and deployment.
+The 9-phase roadmap is COMPLETE -- the platform went from an empty repo to a
+distributed, observable, safety-guarded load tester that runs on Compose and
+Kubernetes with an autoscaling worker pool, a web dashboard, and CI.
 
 ```text
-Deploy the platform like real infrastructure: local Kubernetes (kind or minikube)
-with Deployments/Services for each component, health/readiness probes, service
-discovery, and -- the interesting part -- autoscaling the worker pool (HPA) so
-replicas scale with load. Plus a basic CI pipeline. This is the final roadmap
-phase. (Multi-user auth and the other deferred items above can follow after.)
+Optional future work (none blocking), carried in the follow-ups above:
+- Multi-user layer: authentication / API keys, projects, RBAC, audit logs.
+- Reliability: an outbox to close the insert-then-publish dual-write gap; a
+  heartbeat-free hard concurrency cap; a lease/heartbeat already removed the
+  reclaim double-exec caveat.
+- Runner breadth: status-code breakdown, per-second RPS buckets, assertions /
+  pass-fail thresholds, multi-step scenarios with data correlation.
+- From the roadmap's long-term ideas: multi-region workers, distributed tracing,
+  open-loop (arrival-rate) load model, gRPC/WebSocket targets, the C++ runner
+  experiment.
 ```
 
