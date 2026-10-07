@@ -90,7 +90,7 @@ export default function RunDetail() {
         <Stat label="Total requests" value={fmt(run.totalRequests)} />
         <Stat label="Successful" value={fmt(run.successfulRequests)} />
         <Stat label="Failed" value={fmt(run.failedRequests)} />
-        <Stat label="p95 latency" value={run.p95LatencyMs != null ? `${run.p95LatencyMs} ms` : "—"} />
+        <Stat label="p95 latency" value={run.p95LatencyMs != null ? `${run.p95LatencyMs} ms` : "-"} />
       </div>
 
       <div className="chart-row">
@@ -171,5 +171,5 @@ function Stat({ label, value }) {
 }
 
 function fmt(n) {
-  return n == null ? "—" : n.toLocaleString();
+  return n == null ? "-" : n.toLocaleString();
 }

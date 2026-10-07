@@ -225,7 +225,7 @@ func (s *TestRunStore) ClaimNext(ctx context.Context) (*models.TestRun, error) {
 // the Phase 2 counterpart of ClaimNext: instead of the worker polling for the
 // next queued run, the broker hands it a run id, and the worker starts THAT run.
 //
-// The `WHERE status = 'queued'` guard makes it idempotent — the key property for
+// The `WHERE status = 'queued'` guard makes it idempotent - the key property for
 // at-least-once delivery. If the broker delivers the same job twice, the second
 // StartByID matches no row (the run is already running/completed), so we return
 // ErrNotQueued and the worker knows to skip it. A missing id returns ErrNotFound.
@@ -625,7 +625,7 @@ func (s *TestRunStore) FailShard(ctx context.Context, shardID int64, reason stri
 }
 
 // CountActiveRuns returns how many runs are currently non-terminal
-// (queued / running / cancelling) — used to enforce the concurrency cap.
+// (queued / running / cancelling) - used to enforce the concurrency cap.
 func (s *TestRunStore) CountActiveRuns(ctx context.Context) (int, error) {
 	var count int
 	const q = `

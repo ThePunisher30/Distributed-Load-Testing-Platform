@@ -337,7 +337,7 @@ func TestStore_Shards(t *testing.T) {
 	if _, err := s.StartShard(ctx, ids[0]); !errors.Is(err, ErrNotQueued) {
 		t.Errorf("duplicate StartShard error = %v, want ErrNotQueued", err)
 	}
-	// Complete shard 0 — run moves to running but must NOT complete yet.
+	// Complete shard 0 - run moves to running but must NOT complete yet.
 	if err := s.CompleteShard(ctx, ids[0], shardPartial(12, 10, 2, 10, 4, 1, 8)); err != nil {
 		t.Fatalf("CompleteShard 0: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestStore_Shards(t *testing.T) {
 		t.Error("run results must stay empty until all shards finish")
 	}
 
-	// Complete shard 1 — barrier fires, run aggregates and completes.
+	// Complete shard 1 - barrier fires, run aggregates and completes.
 	if _, err := s.StartShard(ctx, ids[1]); err != nil {
 		t.Fatalf("StartShard 1: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestStore_Shards(t *testing.T) {
 	wantI64(t, "total", done.TotalRequests, 20)        // 12 + 8
 	wantI64(t, "success", done.SuccessfulRequests, 18) // 10 + 8
 	wantI64(t, "failed", done.FailedRequests, 2)       // 2 + 0
-	wantF64(t, "avg", done.AvgLatencyMs, 5.0)          // (4*10 + 6*10) / 20 — weighted
+	wantF64(t, "avg", done.AvgLatencyMs, 5.0)          // (4*10 + 6*10) / 20 - weighted
 	wantF64(t, "min", done.MinLatencyMs, 1)            // min(1, 2)
 	wantF64(t, "max", done.MaxLatencyMs, 9)            // max(8, 9)
 	if done.CompletedAt == nil {
@@ -536,7 +536,7 @@ func TestStore_Complete(t *testing.T) {
 		t.Error("completedAt should be set")
 	}
 
-	// Completing it AGAIN must fail: it is no longer running (idempotency guard —
+	// Completing it AGAIN must fail: it is no longer running (idempotency guard -
 	// this is what protects against duplicate delivery in Phase 2).
 	if _, err := s.Complete(ctx, run.ID, completed); !errors.Is(err, ErrNotRunning) {
 		t.Errorf("double-complete error = %v, want ErrNotRunning", err)

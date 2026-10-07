@@ -3,12 +3,12 @@
 A learning-focused distributed load testing platform. The goal is not just to
 build a tool that sends HTTP requests, but to understand the system design behind
 distributed workers, orchestration, message queues, metrics, failure handling,
-and observability — by building each piece from scratch.
+and observability - by building each piece from scratch.
 
 **All 9 roadmap phases are complete.** A full test-run lifecycle, distributed
 through a Redis Streams message broker, with worker crash recovery and
-dead-lettering, run across multiple worker replicas — including splitting a single
-run into shards that execute in parallel and are re-aggregated — with live
+dead-lettering, run across multiple worker replicas - including splitting a single
+run into shards that execute in parallel and are re-aggregated - with live
 Prometheus metrics and a Grafana dashboard showing what happens as a run executes.
 The runner sends custom methods, headers, and bodies with optional think-time, and
 reports latency percentiles (p50/p95/p99) merged across shards. A heartbeat/lease
@@ -40,7 +40,7 @@ Frontend        React dashboard: create/list/inspect/cancel runs (nginx + /api p
 ```
 
 The load runner is written from scratch (no k6, JMeter, Locust, or Gatling) on
-purpose: it is where the concurrency lessons live — a goroutine per virtual user,
+purpose: it is where the concurrency lessons live - a goroutine per virtual user,
 context cancellation, per-request timeouts, and race-free result aggregation.
 
 ## Architecture
@@ -76,7 +76,7 @@ Everything runs in Docker Compose:
 docker compose up --build
 ```
 
-Run several worker replicas — the Redis consumer group load-balances runs across them:
+Run several worker replicas - the Redis consumer group load-balances runs across them:
 
 ```bash
 docker compose up -d --build --scale worker=3
@@ -168,7 +168,7 @@ Rates and percentiles are derived at query time in PromQL, e.g. fleet RPS is
 ## Safety
 
 The platform refuses to be a weapon. A run may only target hosts on an
-**allowlist** (`ALLOWED_TARGET_HOSTS`, default `target,localhost,127.0.0.1`) — any
+**allowlist** (`ALLOWED_TARGET_HOSTS`, default `target,localhost,127.0.0.1`) - any
 other host is rejected with `403`, which blocks both DDoS-for-hire and SSRF to
 internal addresses. To load-test your own service, add its host to that env var.
 A **concurrent-run cap** (`MAX_CONCURRENT_RUNS`, default 10) returns `429` once
@@ -207,13 +207,13 @@ stays green without a database.
 
 Current:
 
-- Go — backend, worker, target service, and the custom runner
-- PostgreSQL — persistent storage and source of truth
-- Redis Streams — job-distribution message broker (consumer groups, reclaim, dead-letter)
-- Prometheus + Grafana — pull-based metrics and live dashboards
-- React + Vite + Recharts — the web dashboard (served by nginx, which proxies /api)
-- Docker Compose — local infrastructure, one-command startup; scale workers with `--scale worker=N` (they share the consumer group)
-- Kubernetes — real-infra deployment with an autoscaling worker pool (HPA); GitHub Actions for CI
+- Go - backend, worker, target service, and the custom runner
+- PostgreSQL - persistent storage and source of truth
+- Redis Streams - job-distribution message broker (consumer groups, reclaim, dead-letter)
+- Prometheus + Grafana - pull-based metrics and live dashboards
+- React + Vite + Recharts - the web dashboard (served by nginx, which proxies /api)
+- Docker Compose - local infrastructure, one-command startup; scale workers with `--scale worker=N` (they share the consumer group)
+- Kubernetes - real-infra deployment with an autoscaling worker pool (HPA); GitHub Actions for CI
 
 Optional future work (the roadmap's 9 phases are complete):
 

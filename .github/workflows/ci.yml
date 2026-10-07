@@ -32,7 +32,7 @@ jobs:
         with:
           go-version: "1.26"
 
-      - name: backend — build, vet, test
+      - name: backend - build, vet, test
         working-directory: backend
         env:
           TEST_DATABASE_URL: "postgres://dltp:dltp@localhost:5432/dltp_test?sslmode=disable"
@@ -41,14 +41,14 @@ jobs:
           go vet ./...
           go test ./...
 
-      - name: worker — build, vet, test (race)
+      - name: worker - build, vet, test (race)
         working-directory: worker
         run: |
           go build ./...
           go vet ./...
           go test -race ./...
 
-      - name: target — build, vet
+      - name: target - build, vet
         working-directory: target
         run: |
           go build ./...

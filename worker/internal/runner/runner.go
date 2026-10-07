@@ -94,7 +94,7 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 }
 
 // runVirtualUser is one virtual user's closed loop: send a request, wait for the
-// response, send the next — back to back until the run context is done (its
+// response, send the next - back to back until the run context is done (its
 // duration elapsed, or the worker was cancelled). Every outcome is recorded into
 // this VU's own s, which no other goroutine touches.
 func runVirtualUser(ctx context.Context, client *http.Client, cfg Config, s *vuStats) {
@@ -145,7 +145,7 @@ func doRequest(ctx context.Context, client *http.Client, cfg Config, s *vuStats)
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
-	// NOTE: on Windows the monotonic clock is coarse — fast localhost requests
+	// NOTE: on Windows the monotonic clock is coarse - fast localhost requests
 	// can measure 0 ns here, so min latency may read 0.0 in local dev. On Linux
 	// (where the worker runs in its container) the resolution is nanoseconds.
 	elapsedMs := float64(time.Since(start).Nanoseconds()) / 1e6

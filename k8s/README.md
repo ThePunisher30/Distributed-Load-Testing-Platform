@@ -10,7 +10,7 @@ Prometheus + Grafana run in-cluster so the dashboards see the k8s workload.
 - A running cluster: `kubectl get nodes` should succeed. (Docker Desktop →
   Settings → Kubernetes → Enable.)
 - The images built locally (Docker Desktop's k8s shares the Docker image store, so
-  no registry is needed — the manifests use `imagePullPolicy: IfNotPresent`):
+  no registry is needed - the manifests use `imagePullPolicy: IfNotPresent`):
 
   ```bash
   docker compose build backend worker target frontend

@@ -222,7 +222,7 @@ func reclaimStuck(ctx context.Context, c *client.Client, rdb *redis.Client, cons
 			continue
 		}
 		for _, msg := range msgs {
-			log.Printf("reclaiming idle message %s (delivery %d) — its worker is presumed dead", msg.ID, p.RetryCount)
+			log.Printf("reclaiming idle message %s (delivery %d) - its worker is presumed dead", msg.ID, p.RetryCount)
 			handleMessage(ctx, c, rdb, msg, true, consumer, heartbeatInterval)
 		}
 	}

@@ -30,12 +30,12 @@ export default function RunList({ runs, error }) {
               <td><StatusBadge status={r.status} /></td>
               <td className="num">{r.virtualUsers}</td>
               <td className="num">{r.shardCount}</td>
-              <td className="num">{r.totalRequests != null ? r.totalRequests.toLocaleString() : "—"}</td>
-              <td className="num">{r.p95LatencyMs != null ? `${r.p95LatencyMs} ms` : "—"}</td>
+              <td className="num">{r.totalRequests != null ? r.totalRequests.toLocaleString() : "-"}</td>
+              <td className="num">{r.p95LatencyMs != null ? `${r.p95LatencyMs} ms` : "-"}</td>
             </tr>
           ))}
           {runs.length === 0 && (
-            <tr><td colSpan={7} className="empty">No runs yet — start one on the left.</td></tr>
+            <tr><td colSpan={7} className="empty">No runs yet - start one on the left.</td></tr>
           )}
         </tbody>
       </table>

@@ -112,8 +112,8 @@ func (c *Client) ClaimNext(ctx context.Context) (*TestRun, bool, error) {
 
 // StartRun asks the backend to start a specific run by id (Phase 2: the worker
 // gets the id from Redis, then starts that run). The bool is "started": false
-// means the run was not startable — already started/completed (a duplicate
-// delivery) or not found — which the worker should ack and skip, not retry.
+// means the run was not startable - already started/completed (a duplicate
+// delivery) or not found - which the worker should ack and skip, not retry.
 func (c *Client) StartRun(ctx context.Context, id int64) (*TestRun, bool, error) {
 	url := c.baseURL + "/internal/test-runs/" + strconv.FormatInt(id, 10) + "/start"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)

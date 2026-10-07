@@ -1,7 +1,7 @@
 package runner
 
 // vuStats is one virtual user's private tally of results. During a run, each
-// virtual user (a goroutine) touches ONLY its own vuStats — nothing is shared —
+// virtual user (a goroutine) touches ONLY its own vuStats - nothing is shared -
 // so no locks are needed. The separate tallies are combined once at the end.
 type vuStats struct {
 	total        int64   // every request attempted

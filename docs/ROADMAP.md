@@ -2,6 +2,23 @@
 
 This roadmap is intentionally phased. Each phase adds one major system design idea while keeping the platform working end to end.
 
+> **Status: all 9 phases are COMPLETE.** The sections below are the *original plan*
+> (kept as the record of intent, in forward-looking tense). For what was actually
+> built and verified, see [PROGRESS.md](PROGRESS.md) and
+> [ARCHITECTURE.md](ARCHITECTURE.md).
+
+| Phase | Theme | Status |
+|---|---|---|
+| 1 | Single-worker MVP (lifecycle + custom runner) | ✅ Done |
+| 2 | Queue-based distribution (Redis Streams) | ✅ Done |
+| 3 | Multiple workers (replicas + run sharding) | ✅ Done |
+| 4 | Metrics & observability (Prometheus/Grafana) | ✅ Done |
+| 5 | Better runner (headers/body, percentiles, think-time) | ✅ Done |
+| 6 | Failure handling (heartbeat/lease + cancellation) | ✅ Done |
+| 7 | Dashboard (React/Vite) | ✅ Done |
+| 8 | Safety & multi-user controls | ✅ Done - allowlist + concurrency cap built; **auth/projects/RBAC/audit logs scoped out** (optional future work) |
+| 9 | Local orchestration & deployment (Kubernetes + autoscaling + CI) | ✅ Done |
+
 ## Phase 1: Single-Worker MVP
 
 Goal:

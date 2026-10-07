@@ -40,7 +40,7 @@ func NewPublisher(rdb *redis.Client) *Publisher {
 
 // PublishJob appends one job carrying the run id to the stream. XADD returns a
 // server-assigned message id; workers consume these via a consumer group. Only
-// the id travels in the message — the worker fetches the run's config from the
+// the id travels in the message - the worker fetches the run's config from the
 // backend when it starts the run, keeping Postgres the single source of truth.
 func (p *Publisher) PublishJob(ctx context.Context, runID int64) error {
 	err := p.rdb.XAdd(ctx, &redis.XAddArgs{

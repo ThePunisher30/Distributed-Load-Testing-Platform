@@ -50,7 +50,7 @@ func TestMergeStats_ZeroSampleVU(t *testing.T) {
 		FailedRequests:     2,
 		LatencyCount:       1, // only vu1's single sample
 		AvgLatencyMs:       5,
-		MinLatencyMs:       5, // NOT 0 — vu2 contributed no samples
+		MinLatencyMs:       5, // NOT 0 - vu2 contributed no samples
 		MaxLatencyMs:       5,
 	}
 
